@@ -13,6 +13,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 import numpy as np
+import math
 
 import torchvision
 import torchvision.transforms as transforms
@@ -49,6 +50,11 @@ parser.add_argument('--patch', default='4', type=int, help="patch for ViT")
 parser.add_argument('--dimhead', default="512", type=int)
 parser.add_argument('--convkernel', default='8', type=int, help="parameter for convmixer")
 parser.add_argument('--dataset', default='cifar10', type=str, help='dataset to use (cifar10 or cifar100)')
+parser.add_argument('--kl_alpha_max', default=0.5, type=float, help='maximum kl alpha for DyT')
+parser.add_argument('--min_p', default=0.1, type=float, help='minimum p for TriOD models')
+parser.add_argument('--n_models', default=10, type=int, help='number of models for TriOD models')
+
+triangular = True
 
 args = parser.parse_args()
 
@@ -125,19 +131,20 @@ else:
     # CIFAR100 has 100 classes, so we don't list them all here
     classes = None
 
+p_s = np.linspace(args.min_p, 1.0, num=args.n_models)
 # Model factory..
 print('==> Building model..')
 # net = VGG('VGG19')
 if args.net=='res18':
-    net = ResNet18(num_classes=num_classes)
+    net = ResNet18(num_classes=num_classes, triangular=triangular, p_s=p_s)
 elif args.net=='vgg':
     net = VGG('VGG19', num_classes=num_classes)
 elif args.net=='res34':
-    net = ResNet34(num_classes=num_classes)
+    net = ResNet34(num_classes=num_classes, triangular=triangular, p_s=p_s)
 elif args.net=='res50':
-    net = ResNet50(num_classes=num_classes)
+    net = ResNet50(num_classes=num_classes, triangular=triangular, p_s=p_s)
 elif args.net=='res101':
-    net = ResNet101(num_classes=num_classes)
+    net = ResNet101(num_classes=num_classes, triangular=triangular, p_s=p_s)
 elif args.net=="convmixer":
     # from paper, accuracy >96%. you can tune the depth and dim to scale accuracy and speed.
     net = ConvMixer(256, 16, kernel_size=args.convkernel, patch_size=1, n_classes=num_classes)
@@ -162,7 +169,9 @@ elif args.net=="vit_small":
     heads = 8,
     mlp_dim = 512,
     dropout = 0.1,
-    emb_dropout = 0.1
+    emb_dropout = 0.1,
+    triangular = triangular,
+    p_s = p_s
 )
 elif args.net=="vit_tiny":
     from models.vit_small import ViT
@@ -175,7 +184,9 @@ elif args.net=="vit_tiny":
     heads = 6,
     mlp_dim = 256,
     dropout = 0.1,
-    emb_dropout = 0.1
+    emb_dropout = 0.1,
+    triangular = triangular,
+    p_s = p_s
 )
 elif args.net=="simplevit":
     from models.simplevit import SimpleViT
@@ -199,7 +210,9 @@ elif args.net=="vit":
     heads = 8,
     mlp_dim = 512,
     dropout = 0.1,
-    emb_dropout = 0.1
+    emb_dropout = 0.1,
+    triangular = triangular,
+    p_s = p_s
 )
 elif args.net=="dyt":
     # DyT for cifar10/100
@@ -258,6 +271,11 @@ elif args.net=="mobilevit":
 else:
     raise ValueError(f"'{args.net}' is not a valid model")
 
+
+# Check triod prefix OD implementation
+from triod.utils import test_prefix_od
+assert test_prefix_od(net, torch.device("cuda"), trainloader, p_s=p_s), "Prefix OD test failed"
+
 # For Multi-GPU
 if 'cuda' in device:
     print(device)
@@ -295,19 +313,31 @@ def train(epoch):
     train_loss = 0
     correct = 0
     total = 0
+    kl_alpha_max = (
+        args.kl_alpha_max
+        * (1 - math.cos(math.pi * epoch / args.n_epochs))
+        / 2.0
+    )
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         inputs, targets = inputs.to(device), targets.to(device)
         # Train with amp
-        with torch.cuda.amp.autocast(enabled=use_amp):
-            outputs = net(inputs)
-            loss = criterion(outputs, targets)
+        output = net(inputs, all_models=True)
+        output_full = output[-inputs.shape[0]:]
+        kl_loss = 0.0
+        if len(p_s)>1 and kl_alpha_max>0.0:
+            output_submodels = output[:-inputs.shape[0]]
+            with torch.no_grad():
+                soft_targets_prob = output[inputs.shape[0]:].softmax(dim=1)
+            kl_loss = criterion(output_submodels, soft_targets_prob)
+            loss = criterion(output_full, targets) + kl_alpha_max*kl_loss
+        # Backward + step
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad()
 
         train_loss += loss.item()
-        _, predicted = outputs.max(1)
+        _, predicted = output_full.max(1)
         total += targets.size(0)
         correct += predicted.eq(targets).sum().item()
 
