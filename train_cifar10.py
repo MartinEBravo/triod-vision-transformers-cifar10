@@ -33,7 +33,7 @@ from models.mobilevit import mobilevit_xxs
 from models.dyt import DyT
 
 # parsers
-parser = argparse.ArgumentParser(description='PyTorch CIFAR10/100 Training')
+parser = argparse.ArgumentParser(description='PyTorch CIFAR10/100/ImageNet Training')
 parser.add_argument('--lr', default=1e-4, type=float, help='learning rate') # resnets.. 1e-3, Vit..1e-4
 parser.add_argument('--opt', default="adam")
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
@@ -49,7 +49,7 @@ parser.add_argument('--n_epochs', type=int, default='200')
 parser.add_argument('--patch', default='4', type=int, help="patch for ViT")
 parser.add_argument('--dimhead', default="512", type=int)
 parser.add_argument('--convkernel', default='8', type=int, help="parameter for convmixer")
-parser.add_argument('--dataset', default='cifar10', type=str, help='dataset to use (cifar10 or cifar100)')
+parser.add_argument('--dataset', default='cifar10', type=str, help='dataset to use (cifar10, cifar100, imagenet)')
 parser.add_argument('--kl_alpha_max', default=0.5, type=float, help='maximum kl alpha for DyT')
 parser.add_argument('--min_p', default=0.1, type=float, help='minimum p for TriOD models')
 parser.add_argument('--n_models', default=10, type=int, help='number of models for TriOD models')
@@ -95,8 +95,13 @@ elif args.dataset == 'cifar100':
     std = (0.2675, 0.2565, 0.2761)
     num_classes = 100
     dataset_class = torchvision.datasets.CIFAR100
+elif args.dataset=="imagenet":
+    mean = (0.485, 0.456, 0.406)
+    std = (0.229, 0.224, 0.225)
+    num_classes = 1000
+    dataset_class = torchvision.datasets.ImageNet
 else:
-    raise ValueError("Dataset must be either 'cifar10' or 'cifar100'")
+    raise ValueError("Dataset must be either 'cifar10', 'cifar100', or 'imagenet'")
 
 transform_train = transforms.Compose([
     transforms.RandomCrop(32, padding=4),
@@ -138,7 +143,7 @@ print('==> Building model..')
 if args.net=='res18':
     net = ResNet18(num_classes=num_classes, triangular=triangular, p_s=p_s)
 elif args.net=='vgg':
-    net = VGG('VGG19', num_classes=num_classes)
+    net = VGG('VGG19', num_classes=num_classes, triangular=triangular, p_s=p_s)
 elif args.net=='res34':
     net = ResNet34(num_classes=num_classes, triangular=triangular, p_s=p_s)
 elif args.net=='res50':
