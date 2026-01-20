@@ -34,16 +34,16 @@ from models.dyt import DyT
 
 # parsers
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10/100/ImageNet Training')
-parser.add_argument('--lr', default=1e-4, type=float, help='learning rate') # resnets.. 1e-3, Vit..1e-4
-parser.add_argument('--opt', default="adam")
+parser.add_argument('--lr', default=1e-2, type=float, help='learning rate') # resnets.. 1e-3, Vit..1e-4
+parser.add_argument('--opt', default="sgd")
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--noaug', action='store_false', help='disable use randomaug')
 parser.add_argument('--noamp', action='store_true', help='disable mixed precision training. for older pytorch versions')
 parser.add_argument('--nowandb', action='store_true', help='disable wandb')
 parser.add_argument('--mixup', action='store_true', help='add mixup augumentations')
-parser.add_argument('--net', default='vit')
+parser.add_argument('--net', default='res18')
 parser.add_argument('--dp', action='store_true', help='use data parallel')
-parser.add_argument('--bs', default='512')
+parser.add_argument('--bs', default='128')
 parser.add_argument('--size', default="32")
 parser.add_argument('--n_epochs', type=int, default='200')
 parser.add_argument('--patch', default='4', type=int, help="patch for ViT")
@@ -51,19 +51,19 @@ parser.add_argument('--dimhead', default="512", type=int)
 parser.add_argument('--convkernel', default='8', type=int, help="parameter for convmixer")
 parser.add_argument('--dataset', default='cifar10', type=str, help='dataset to use (cifar10, cifar100, imagenet)')
 parser.add_argument('--kl_alpha_max', default=0.5, type=float, help='maximum kl alpha for DyT')
-parser.add_argument('--min_p', default=0.1, type=float, help='minimum p for TriOD models')
-parser.add_argument('--n_models', default=10, type=int, help='number of models for TriOD models')
+parser.add_argument('--min_p', default=0.3, type=float, help='minimum p for TriOD models')
+parser.add_argument('--n_models', default=8, type=int, help='number of models for TriOD models')
 
 triangular = True
 
 args = parser.parse_args()
 
 # take in args
-usewandb = ~args.nowandb
+usewandb = not args.nowandb
 if usewandb:
     import wandb
     watermark = "{}_lr{}_{}".format(args.net, args.lr, args.dataset)
-    wandb.init(project="cifar-challenge",
+    wandb.init(project="triod",
             name=watermark)
     wandb.config.update(args)
 
@@ -133,7 +133,8 @@ testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False,
 if args.dataset == 'cifar10':
     classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
 else:
-    # CIFAR100 has 100 classes, so we don't list them all here
+    # CIFAR100 has 100 classes and Imagenet has 1000 classes,
+    # so we don't list them all here
     classes = None
 
 p_s = np.linspace(args.min_p, 1.0, num=args.n_models)
@@ -276,6 +277,9 @@ elif args.net=="mobilevit":
 else:
     raise ValueError(f"'{args.net}' is not a valid model")
 
+# net to cuda
+net = net.to(device)
+
 
 # Check triod prefix OD implementation
 from triod.utils import test_prefix_od
@@ -315,9 +319,8 @@ scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 def train(epoch):
     print('\nEpoch: %d' % epoch)
     net.train()
+    correct = [0] * len(p_s)
     train_loss = 0
-    correct = 0
-    total = 0
     kl_alpha_max = (
         args.kl_alpha_max
         * (1 - math.cos(math.pi * epoch / args.n_epochs))
@@ -327,27 +330,35 @@ def train(epoch):
         inputs, targets = inputs.to(device), targets.to(device)
         # Train with amp
         output = net(inputs, all_models=True)
-        output_full = output[-inputs.shape[0]:]
+        B = inputs.shape[0]
+        output_full = output[-B:]
         kl_loss = 0.0
-        if len(p_s)>1 and kl_alpha_max>0.0:
-            output_submodels = output[:-inputs.shape[0]]
+        if len(p_s)>1:
+            output_submodels = output[:-B]
+            output_teachers = output[B:]
             with torch.no_grad():
-                soft_targets_prob = output[inputs.shape[0]:].softmax(dim=1)
-            kl_loss = criterion(output_submodels, soft_targets_prob)
-            loss = criterion(output_full, targets) + kl_alpha_max*kl_loss
+                prob_teachers = output_teachers.softmax(dim=1)
+            kl_loss = criterion(output_submodels, prob_teachers)
+        loss = criterion(output_full, targets) + kl_alpha_max*kl_loss
         # Backward + step
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad()
-
+        if len(p_s) > 1:
+            output_models = output.reshape(len(p_s), B, -1)
+            predicted_models = output_models.argmax(dim=2)
+            for i in range(len(p_s)):
+                correct[i] += predicted_models[i].eq(targets).sum().item()
+            per_p_msg = " | ".join(
+                f"p={p_s[i]:.2f}:{100.0*correct[i]/((batch_idx+1)*B):.2f}%"
+                for i in range(len(p_s))
+            )
+            if batch_idx + 1 == len(trainloader):
+                print(f"Train acc per p: {per_p_msg}")
         train_loss += loss.item()
-        _, predicted = output_full.max(1)
-        total += targets.size(0)
-        correct += predicted.eq(targets).sum().item()
-
-        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-            % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
+        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Mean Acc: %.3f%% | Acc per p: %s'
+            % (train_loss/(batch_idx+1), sum(correct)/((batch_idx+1)*B*len(p_s))*100, per_p_msg))
     return train_loss/(batch_idx+1)
 
 ##### Validation
@@ -355,24 +366,30 @@ def test(epoch):
     global best_acc
     net.eval()
     test_loss = 0
-    correct = 0
-    total = 0
+    correct = [0] * len(p_s)
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(testloader):
             inputs, targets = inputs.to(device), targets.to(device)
-            outputs = net(inputs)
-            loss = criterion(outputs, targets)
-
+            output = net(inputs, all_models=True)
+            output_full = output[-inputs.shape[0]:]
+            loss = criterion(output_full, targets.view(-1))
             test_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
-
-            progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                % (test_loss/(batch_idx+1), 100.*correct/total, correct, total))
-    
-    # Save checkpoint.
-    acc = 100.*correct/total
+            output_models = output.reshape(len(p_s), inputs.shape[0], -1)
+            predicted_models = output_models.argmax(dim=2)
+            for i in range(len(p_s)):
+                correct[i] += predicted_models[i].eq(targets).sum().item()
+            per_p_msg = " | ".join(
+                f"p={p_s[i]:.2f}:{100.0*correct[i]/((batch_idx+1)*inputs.shape[0]):.2f}%"
+                for i in range(len(p_s))
+            )
+            progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Mean Acc: %.3f%% | Acc per p: %s'
+                % (test_loss/(batch_idx+1), sum(correct)/((batch_idx+1)*inputs.shape[0]*len(p_s))*100, per_p_msg))
+    per_p_acc = []
+    for i in range(len(p_s)):
+        acc = 100.0 * correct[i] / len(testloader.dataset)
+        per_p_acc.append(torch.tensor(acc))
+        print(f"  p={p_s[i]:.2f}  Acc: {acc:.4f} ")
+    acc = sum(per_p_acc).item() / len(per_p_acc)
     if acc > best_acc:
         print('Saving..')
         state = {
@@ -393,7 +410,7 @@ def test(epoch):
     log_file = f'log/log_{args.net}_{args.dataset}_patch{args.patch}.txt'
     with open(log_file, 'a') as appender:
         appender.write(content + "\n")
-    return test_loss, acc
+    return test_loss, acc, per_p_acc
 
 list_loss = []
 list_acc = []
@@ -405,7 +422,7 @@ net.cuda()
 for epoch in range(start_epoch, args.n_epochs):
     start = time.time()
     trainloss = train(epoch)
-    val_loss, acc = test(epoch)
+    val_loss, acc, per_p_acc = test(epoch)
     
     scheduler.step(epoch-1) # step cosine scheduling
     
@@ -414,8 +431,18 @@ for epoch in range(start_epoch, args.n_epochs):
     
     # Log training..
     if usewandb:
-        wandb.log({'epoch': epoch, 'train_loss': trainloss, 'val_loss': val_loss, "val_acc": acc, "lr": optimizer.param_groups[0]["lr"],
-        "epoch_time": time.time()-start})
+        log_payload = {
+            'epoch': epoch,
+            'train_loss': trainloss,
+            'val_loss': val_loss,
+            "mean_acc": acc,
+            "lr": optimizer.param_groups[0]["lr"],
+            "epoch_time": time.time()-start,
+        }
+        if per_p_acc is not None:
+            for i, p in enumerate(p_s):
+                log_payload[f"acc_p_{p:.2f}"] = per_p_acc[i].item()
+        wandb.log(log_payload)
 
     # Write out csv..
     csv_file = f'log/log_{args.net}_{args.dataset}_patch{args.patch}.csv'

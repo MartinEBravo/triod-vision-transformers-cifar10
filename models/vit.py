@@ -57,7 +57,11 @@ class Attention(nn.Module):
 
         self.attend = nn.Softmax(dim = -1)
         # self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
-        self.to_qkv = TriODLinear(dim, inner_dim * 3, blocks=3, triangular=triangular)
+
+        self.q = TriODLinear(dim, inner_dim, triangular=triangular)
+        self.k = TriODLinear(dim, inner_dim, triangular=triangular)
+        self.v = TriODLinear(dim, inner_dim, triangular=triangular)
+        # self.to_qkv = TriODLinear(dim, inner_dim * 3, triangular=triangular)
 
         self.to_out = SequentialWithP(
             TriODHeadLayerNorm(inner_dim, n_head=heads, triangular=True),
@@ -71,9 +75,13 @@ class Attention(nn.Module):
         p_inner = keep / self.inner_dim
 
 
+        q = self.q(x, p=p_inner)
+        k = self.k(x, p=p_inner)
+        v = self.v(x, p=p_inner)
 
-        qkv = self.to_qkv(x, p=p_inner).chunk(3, dim=-1) 
-        q, k, v = [rearrange(t, 'b n (h d) -> b h n d', h=h_keep, d=self.dim_head) for t in qkv]
+        q = rearrange(q, 'b n (h d) -> b h n d', h=h_keep, d=self.dim_head)
+        k = rearrange(k, 'b n (h d) -> b h n d', h=h_keep, d=self.dim_head)
+        v = rearrange(v, 'b n (h d) -> b h n d', h=h_keep, d=self.dim_head)
 
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
         attn = self.attend(dots)

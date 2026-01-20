@@ -53,9 +53,9 @@ class Bottleneck(nn.Module):
         self.conv3 = TriODConv2d(planes, self.expansion*planes, kernel_size=1, bias=False, triangular=triangular)
         self.bn3 = TriODBatchNorm2d(self.expansion*planes)
 
-        self.shortcut = nn.Sequential()
+        self.shortcut = SequentialWithP()
         if stride != 1 or in_planes != self.expansion*planes:
-            self.shortcut = nn.Sequential(
+            self.shortcut = SequentialWithP(
                 TriODConv2d(in_planes, self.expansion*planes, kernel_size=1, stride=stride, bias=False, triangular=triangular),
                 TriODBatchNorm2d(self.expansion*planes)
             )
@@ -87,7 +87,7 @@ class ResNet(nn.Module):
         self.layer2 = self._make_layer(block, int(128 * mult), num_blocks[1], stride=2, triangular=triangular)
         self.layer3 = self._make_layer(block, int(256 * mult), num_blocks[2], stride=2, triangular=triangular)
         self.layer4 = self._make_layer(block, int(512 * mult), num_blocks[3], stride=2, triangular=triangular)
-        self.linear = nn.Linear(int(512 * mult)*block.expansion, num_classes, triangular=False)
+        self.linear = TriODLinear(int(512 * mult)*block.expansion, num_classes, triangular=False)
     def _make_layer(self, block, planes, num_blocks, stride, triangular):
         strides = [stride] + [1]*(num_blocks-1)
         layers = []
