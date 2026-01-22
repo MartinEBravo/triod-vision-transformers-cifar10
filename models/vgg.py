@@ -24,10 +24,10 @@ class VGG(nn.Module):
         self.classifier = TriODLinear(512, num_classes, triangular=False)
         self.p_s = p_s
 
-    def forward(self, x, p=None, return_prelast=False, return_allmodels=False):
+    def forward(self, x, p=None, return_prelast=False, all_models=False):
         out = self.features(x, p=p)
         out = out.view(out.size(0), -1)
-        if return_allmodels:
+        if all_models:
             out = generate_structured_masked_x(out, self.p_s)
         if return_prelast:
             return out

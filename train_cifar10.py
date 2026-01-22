@@ -45,7 +45,7 @@ parser.add_argument('--net', default='res18')
 parser.add_argument('--dp', action='store_true', help='use data parallel')
 parser.add_argument('--bs', default='128')
 parser.add_argument('--size', default="32")
-parser.add_argument('--n_epochs', type=int, default='200')
+parser.add_argument('--n_epochs', type=int, default='600')
 parser.add_argument('--patch', default='4', type=int, help="patch for ViT")
 parser.add_argument('--dimhead', default="512", type=int)
 parser.add_argument('--convkernel', default='8', type=int, help="parameter for convmixer")
@@ -309,7 +309,7 @@ criterion = nn.CrossEntropyLoss()
 if args.opt == "adam":
     optimizer = optim.Adam(net.parameters(), lr=args.lr)
 elif args.opt == "sgd":
-    optimizer = optim.SGD(net.parameters(), lr=args.lr)  
+    optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
     
 # use cosine scheduling
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.n_epochs)
