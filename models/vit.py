@@ -136,10 +136,8 @@ class ViT(nn.Module):
         self.pool = pool
         self.to_latent = nn.Identity()
 
-        self.mlp_head = SequentialWithP(
-            TriODHeadLayerNorm(dim, n_head=heads, triangular=triangular),
-            TriODLinear(dim, num_classes, triangular=False)
-        )
+        self.ln = TriODHeadLayerNorm(dim, n_head=heads, triangular=triangular),
+        self.classifier = TriODLinear(dim, num_classes, triangular=False)
 
     def forward(self, img, p=None, return_prelast=False, all_models=False):
         x = self.to_patch_embedding(img)
@@ -164,17 +162,12 @@ class ViT(nn.Module):
 
         x = self.to_latent(x)
 
-
+        if all_models and self.p_s is not None:
+            x = generate_structured_masked_x(x, self.p_s)
         # For testing intermediate representations
         if return_prelast:
             return x
-
-        if all_models and self.p_s is not None:
-            x = generate_structured_masked_x(x, self.p_s)
-
-        x = x.unsqueeze(1)
-
-        return self.mlp_head(x,p=None).squeeze(1)
+        return self.classifier(x)
 
 if __name__ == '__main__':
     model = ViT(
@@ -198,4 +191,4 @@ if __name__ == '__main__':
     dataloader = DataLoader([(img, img)])
     logits = model(img, p=0.5)
     print(logits.shape)
-    test_prefix_od(model, 'cuda', dataloader, [0.25, 0.5, 0.75, 1.0])
+    test_prefix_od(model, 'cpu', dataloader, [0.25, 0.5, 0.75, 1.0])

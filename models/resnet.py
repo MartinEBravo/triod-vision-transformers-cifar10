@@ -87,7 +87,7 @@ class ResNet(nn.Module):
         self.layer2 = self._make_layer(block, int(128 * mult), num_blocks[1], stride=2, triangular=triangular)
         self.layer3 = self._make_layer(block, int(256 * mult), num_blocks[2], stride=2, triangular=triangular)
         self.layer4 = self._make_layer(block, int(512 * mult), num_blocks[3], stride=2, triangular=triangular)
-        self.linear = TriODLinear(int(512 * mult)*block.expansion, num_classes, triangular=False)
+        self.classifier = TriODLinear(int(512 * mult)*block.expansion, num_classes, triangular=False)
     def _make_layer(self, block, planes, num_blocks, stride, triangular):
         strides = [stride] + [1]*(num_blocks-1)
         layers = []
@@ -108,7 +108,7 @@ class ResNet(nn.Module):
             out = generate_structured_masked_x(out, self.p_s)
         if return_prelast:
             return out
-        return self.linear(out,p=None)
+        return self.classifier(out,p=None)
 
 
 def ResNet18(num_classes=10, triangular=False, p_s=None):

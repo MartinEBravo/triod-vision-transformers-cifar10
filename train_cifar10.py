@@ -96,10 +96,9 @@ elif args.dataset == 'cifar100':
     num_classes = 100
     dataset_class = torchvision.datasets.CIFAR100
 elif args.dataset=="imagenet":
-    mean = (0.485, 0.456, 0.406)
-    std = (0.229, 0.224, 0.225)
-    num_classes = 1000
-    dataset_class = torchvision.datasets.ImageNet
+    # TODO: implement hugging face dataset for imagenet and turn it into a pytorch dataset
+    pass
+
 else:
     raise ValueError("Dataset must be either 'cifar10', 'cifar100', or 'imagenet'")
 
@@ -282,7 +281,7 @@ net = net.to(device)
 
 
 # Check triod prefix OD implementation
-from triod.utils import test_prefix_od
+from triod.utils import compute_cum_outputs, test_prefix_od
 assert test_prefix_od(net, torch.device("cuda"), trainloader, p_s=p_s), "Prefix OD test failed"
 
 # For Multi-GPU
@@ -319,7 +318,6 @@ scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 def train(epoch):
     print('\nEpoch: %d' % epoch)
     net.train()
-    correct = [0] * len(p_s)
     train_loss = 0
     kl_alpha_max = (
         args.kl_alpha_max
@@ -328,68 +326,79 @@ def train(epoch):
     )
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         inputs, targets = inputs.to(device), targets.to(device)
-        # Train with amp
-        output = net(inputs, all_models=True)
-        B = inputs.shape[0]
-        output_full = output[-B:]
+
+        # output = net(inputs, all_models=True)
+        prelast = net(inputs, return_prelast=True)
+        full_logits = net.classifier(prelast)
+        # full model lost 
+        ce_loss = F.cross_entropy(
+            full_logits,
+            targets,
+            ignore_index=-1
+        )
         kl_loss = 0.0
-        if len(p_s)>1:
-            output_submodels = output[:-B]
-            output_teachers = output[B:]
-            with torch.no_grad():
-                prob_teachers = output_teachers.softmax(dim=1)
-            kl_loss = criterion(output_submodels, prob_teachers)
-        loss = criterion(output_full, targets) + kl_alpha_max*kl_loss
+        for i, teacher_logits in enumerate(compute_cum_outputs(prelast, net.classifier, p_s)):
+            if i == 0:
+                student_logits = teacher_logits
+                continue
+            kl_loss = kl_loss + F.cross_entropy(
+                student_logits,
+                teacher_logits.softmax(dim=-1),
+            )
+            student_logits = teacher_logits.detach()
+
+        kl_loss /= (len(p_s) - 1)
+        loss = ce_loss + kl_alpha_max * kl_loss
+
+        # output_full = output[-B:]
+        # kl_loss = 0.0
+        # if len(p_s)>1:
+        #     output_submodels = output[:-B]
+        #     output_teachers = output[B:]
+        #     with torch.no_grad():
+        #         prob_teachers = output_teachers.softmax(dim=1)
+        #     kl_loss = criterion(output_submodels, prob_teachers)
+
         # Backward + step
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        optimizer.zero_grad()
-        if len(p_s) > 1:
-            output_models = output.reshape(len(p_s), B, -1)
-            predicted_models = output_models.argmax(dim=2)
-            for i in range(len(p_s)):
-                correct[i] += predicted_models[i].eq(targets).sum().item()
-            per_p_msg = " | ".join(
-                f"p={p_s[i]:.2f}:{100.0*correct[i]/((batch_idx+1)*B):.2f}%"
-                for i in range(len(p_s))
-            )
-            if batch_idx + 1 == len(trainloader):
-                print(f"Train acc per p: {per_p_msg}")
+        optimizer.zero_grad(set_to_none=True)
+
         train_loss += loss.item()
-        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Mean Acc: %.3f%% | Acc per p: %s'
-            % (train_loss/(batch_idx+1), sum(correct)/((batch_idx+1)*B*len(p_s))*100, per_p_msg))
+        progress_bar(
+            batch_idx, len(trainloader),
+            'Loss: %.3f'
+            % (
+                train_loss/(batch_idx+1)
+            )
+        )
+
     return train_loss/(batch_idx+1)
 
 ##### Validation
 def test(epoch):
     global best_acc
     net.eval()
-    test_loss = 0
-    correct = [0] * len(p_s)
+    losses = [0.0 for _ in p_s]
+    accs = [0.0 for _ in p_s]
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(testloader):
             inputs, targets = inputs.to(device), targets.to(device)
-            output = net(inputs, all_models=True)
-            output_full = output[-inputs.shape[0]:]
-            loss = criterion(output_full, targets.view(-1))
-            test_loss += loss.item()
-            output_models = output.reshape(len(p_s), inputs.shape[0], -1)
-            predicted_models = output_models.argmax(dim=2)
             for i in range(len(p_s)):
-                correct[i] += predicted_models[i].eq(targets).sum().item()
-            per_p_msg = " | ".join(
-                f"p={p_s[i]:.2f}:{100.0*correct[i]/((batch_idx+1)*inputs.shape[0]):.2f}%"
-                for i in range(len(p_s))
+                output = net(inputs, p=p_s[i])
+                loss = criterion(output, targets)
+                losses[i] += loss.item()
+                _, predicted = output.max(1)
+                accs[i] += predicted.eq(targets).sum().item()/targets.size(0)
+            progress_bar(
+                batch_idx, len(testloader),
+                'Loss per p: ' + ' '.join(['%.3f' for _ in p_s]) % tuple([losses[i]/(batch_idx+1) for i in range(len(p_s))]) +
+                ' Acc per p: ' + ' '.join(['%.3f' for _ in p_s]) % tuple([accs[i]/(batch_idx+1) for i in range(len(p_s))])
             )
-            progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Mean Acc: %.3f%% | Acc per p: %s'
-                % (test_loss/(batch_idx+1), sum(correct)/((batch_idx+1)*inputs.shape[0]*len(p_s))*100, per_p_msg))
-    per_p_acc = []
-    for i in range(len(p_s)):
-        acc = 100.0 * correct[i] / len(testloader.dataset)
-        per_p_acc.append(torch.tensor(acc))
-        print(f"  p={p_s[i]:.2f}  Acc: {acc:.4f} ")
-    acc = sum(per_p_acc).item() / len(per_p_acc)
+
+    acc = mean(accs)
+    loss = mean(losses)
     if acc > best_acc:
         print('Saving..')
         state = {
@@ -405,12 +414,12 @@ def test(epoch):
         best_acc = acc
     
     os.makedirs("log", exist_ok=True)
-    content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, val loss: {test_loss:.5f}, acc: {(acc):.5f}'
+    content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, loss: {(loss):.5f}, acc: {(acc):.5f}'
     print(content)
     log_file = f'log/log_{args.net}_{args.dataset}_patch{args.patch}.txt'
     with open(log_file, 'a') as appender:
         appender.write(content + "\n")
-    return test_loss, acc, per_p_acc
+    return losses, accs
 
 list_loss = []
 list_acc = []
@@ -422,26 +431,26 @@ net.cuda()
 for epoch in range(start_epoch, args.n_epochs):
     start = time.time()
     trainloss = train(epoch)
-    val_loss, acc, per_p_acc = test(epoch)
+    val_losses, val_accs = test(epoch)
     
     scheduler.step(epoch-1) # step cosine scheduling
     
-    list_loss.append(val_loss)
-    list_acc.append(acc)
+    list_loss.append(mean(val_losses))
+    list_acc.append(mean(val_accs))
     
     # Log training..
     if usewandb:
         log_payload = {
             'epoch': epoch,
             'train_loss': trainloss,
-            'val_loss': val_loss,
-            "mean_acc": acc,
+            'mean_loss': mean(val_losses),
+            "mean_acc": mean(val_accs),
             "lr": optimizer.param_groups[0]["lr"],
             "epoch_time": time.time()-start,
         }
-        if per_p_acc is not None:
-            for i, p in enumerate(p_s):
-                log_payload[f"acc_p_{p:.2f}"] = per_p_acc[i].item()
+        for i, p in enumerate(p_s):
+            log_payload[f"acc_p_{p:.2f}"] = val_accs[i]
+            log_payload[f"loss_p_{p:.2f}"] = val_losses[i]
         wandb.log(log_payload)
 
     # Write out csv..
