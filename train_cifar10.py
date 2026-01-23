@@ -419,7 +419,7 @@ for epoch in range(start_epoch, args.n_epochs):
     trainloss = train(epoch)
     val_losses, val_accs = test(epoch)
     
-    scheduler.step(epoch-1) # step cosine scheduling
+    scheduler.step() # step cosine scheduling
     
     # Log training..
     if usewandb:
