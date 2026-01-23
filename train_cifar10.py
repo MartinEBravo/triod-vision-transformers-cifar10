@@ -51,8 +51,8 @@ parser.add_argument('--dimhead', default="512", type=int)
 parser.add_argument('--convkernel', default='8', type=int, help="parameter for convmixer")
 parser.add_argument('--dataset', default='cifar10', type=str, help='dataset to use (cifar10, cifar100, imagenet)')
 parser.add_argument('--kl_alpha_max', default=0.5, type=float, help='maximum kl alpha for DyT')
-parser.add_argument('--min_p', default=0.3, type=float, help='minimum p for TriOD models')
-parser.add_argument('--n_models', default=8, type=int, help='number of models for TriOD models')
+parser.add_argument('--min_p', default=0.2, type=float, help='minimum p for TriOD models')
+parser.add_argument('--n_models', default=5, type=int, help='number of models for TriOD models')
 
 triangular = True
 
