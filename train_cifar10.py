@@ -32,9 +32,12 @@ from models.convmixer import ConvMixer
 from models.mobilevit import mobilevit_xxs
 from models.dyt import DyT
 
+# Check triod prefix OD implementation
+from triod.utils import compute_cum_outputs, test_prefix_od
+
 # parsers
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10/100/ImageNet Training')
-parser.add_argument('--lr', default=1e-2, type=float, help='learning rate') # resnets.. 1e-3, Vit..1e-4
+parser.add_argument('--lr', default=0.016, type=float, help='learning rate') # resnets.. 1e-3, Vit..1e-4
 parser.add_argument('--opt', default="sgd")
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--noaug', action='store_false', help='disable use randomaug')
@@ -46,14 +49,15 @@ parser.add_argument('--dp', action='store_true', help='use data parallel')
 parser.add_argument('--gpu', default='all', type=str, help='GPU id to use.')
 parser.add_argument('--bs', default='128')
 parser.add_argument('--size', default="32")
-parser.add_argument('--n_epochs', type=int, default='600')
+parser.add_argument('--n_epochs', type=int, default='200')
 parser.add_argument('--patch', default='4', type=int, help="patch for ViT")
 parser.add_argument('--dimhead', default="512", type=int)
 parser.add_argument('--convkernel', default='8', type=int, help="parameter for convmixer")
 parser.add_argument('--dataset', default='cifar10', type=str, help='dataset to use (cifar10, cifar100, imagenet)')
-parser.add_argument('--kl_alpha_max', default=0.5, type=float, help='maximum kl alpha for DyT')
-parser.add_argument('--min_p', default=0.2, type=float, help='minimum p for TriOD models')
-parser.add_argument('--n_models', default=5, type=int, help='number of models for TriOD models')
+parser.add_argument('--kl_alpha_max', default=0.59, type=float, help='maximum kl alpha for DyT')
+parser.add_argument('--min_p', default=0.1, type=float, help='minimum p for TriOD models')
+parser.add_argument('--n_models', default=10, type=int, help='number of models for TriOD models')
+parser.add_argument('--use_hkd', action='store_true', help='use hierarchical knowledge distillation')
 
 triangular = True
 
@@ -64,7 +68,9 @@ usewandb = not args.nowandb
 if usewandb:
     import wandb
     watermark = "{}_lr{}_{}".format(args.net, args.lr, args.dataset)
-    wandb.init(project="triod",
+    wandb.init(
+            entity="martin-bravo-mbzuai",
+            project="triod",
             name=watermark)
     wandb.config.update(args)
 
@@ -280,15 +286,6 @@ elif args.net=="mobilevit":
 else:
     raise ValueError(f"'{args.net}' is not a valid model")
 
-# net to cuda
-net = net.to(device)
-classification_head = net.classifier
-
-
-# Check triod prefix OD implementation
-from triod.utils import compute_cum_outputs, test_prefix_od
-assert test_prefix_od(net, torch.device("cuda"), trainloader, p_s=p_s), "Prefix OD test failed"
-
 # For Multi-GPU
 if 'cuda' in device:
     print(device)
@@ -296,6 +293,12 @@ if 'cuda' in device:
         print("using data parallel")
         net = torch.nn.DataParallel(net) # make parallel
         cudnn.benchmark = True
+# net to cuda
+net = net.to(device)
+classification_head = net.classifier
+
+assert test_prefix_od(net, device, trainloader, p_s=p_s), "Prefix OD test failed"
+
 
 if args.resume:
     # Load checkpoint.
@@ -329,7 +332,6 @@ elif args.opt == "sgd":
         lr=args.lr,
         momentum=0.9,
     )
-    optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
     
 # use cosine scheduling
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.n_epochs)
