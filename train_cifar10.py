@@ -366,13 +366,8 @@ def train(epoch):
         optimizer.zero_grad(set_to_none=True)
 
         train_loss += loss.item()
-        progress_bar(
-            batch_idx, len(trainloader),
-            'Loss: %.3f'
-            % (
-                train_loss/(batch_idx+1)
-            )
-        )
+        progress_bar(batch_idx, len(trainloader))
+    print(f"Loss: {loss.item():.3f} | KL Alpha: {kl_alpha_max:.3f} ", end='\r')
 
     return train_loss/(batch_idx+1)
 
@@ -391,14 +386,12 @@ def test(epoch):
                 losses[i] += loss.item()
                 _, predicted = output.max(1)
                 accs[i] += predicted.eq(targets).sum().item()/targets.size(0)
-            progress_bar(
-                batch_idx, len(testloader),
-                'Loss per p: ' + ' '.join(['%.3f' for _ in p_s]) % tuple([losses[i]/(batch_idx+1) for i in range(len(p_s))]) +
-                ' Acc per p: ' + ' '.join(['%.3f' for _ in p_s]) % tuple([accs[i]/(batch_idx+1) for i in range(len(p_s))])
-            )
+            progress_bar(batch_idx, len(testloader))
+    print('Loss: ' + 'p = ' + ', '.join([f'{p_s[i]:.2f}: {losses[i]/(batch_idx+1):.3f}' for i in range(len(p_s))]), end=' | ')
+    print('Accuracy: ' + 'p = ' + ', '.join([f'{p_s[i]:.2f}: {accs[i]/(batch_idx+1):.3f}' for i in range(len(p_s))]))
 
-    acc = mean(accs)
-    loss = mean(losses)
+    # Save checkpoint.
+    acc = sum(accs)/len(accs)/(batch_idx+1)
     if acc > best_acc:
         print('Saving..')
         state = {
@@ -412,13 +405,6 @@ def test(epoch):
             os.mkdir('checkpoint')
         torch.save(state, './checkpoint/{}-{}-{}-ckpt.t7'.format(args.net, args.dataset, args.patch))
         best_acc = acc
-    
-    os.makedirs("log", exist_ok=True)
-    content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, loss: {(loss):.5f}, acc: {(acc):.5f}'
-    print(content)
-    log_file = f'log/log_{args.net}_{args.dataset}_patch{args.patch}.txt'
-    with open(log_file, 'a') as appender:
-        appender.write(content + "\n")
     return losses, accs
 
 list_loss = []
