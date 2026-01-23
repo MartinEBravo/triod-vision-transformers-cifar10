@@ -405,8 +405,8 @@ def test(epoch):
 
     accs = 100*np.array(accs)/(batch_idx+1)
     losses = losses/(batch_idx+1)
-    print('Loss: ' + 'p = ' + ', '.join([f'{p_s[i]:.2f}: {losses[i]:.2f}' for i in range(len(p_s))]))
-    print('Accuracy: ' + 'p = ' + ', '.join([f'{p_s[i]:.2f}: {accs[i]:.2f}%' for i in range(len(p_s))]))
+    for i, p in enumerate(p_s):
+        print("p={:.2f} | Loss: {:.3f} | Acc: {:.3f}%".format(p, losses[i], accs[i]))
 
     # Save checkpoint.
     acc = np.mean(accs)
