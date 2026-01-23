@@ -43,6 +43,7 @@ parser.add_argument('--nowandb', action='store_true', help='disable wandb')
 parser.add_argument('--mixup', action='store_true', help='add mixup augumentations')
 parser.add_argument('--net', default='res18')
 parser.add_argument('--dp', action='store_true', help='use data parallel')
+parser.add_argument('--gpu', default='all', type=str, help='GPU id to use.')
 parser.add_argument('--bs', default='128')
 parser.add_argument('--size', default="32")
 parser.add_argument('--n_epochs', type=int, default='600')
@@ -73,7 +74,10 @@ imsize = int(args.size)
 use_amp = not args.noamp
 aug = args.noaug
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+if not args.gpu=='all':
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+device = "cuda" if torch.cuda.is_available() else "cpu"
 best_acc = 0  # best test accuracy
 start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 
@@ -359,9 +363,9 @@ def train(epoch):
                 continue
             kl_loss = kl_loss + F.cross_entropy(
                 student_logits,
-                teacher_logits.softmax(dim=-1),
+                teacher_logits.softmax(dim=-1).detach(),
             )
-            student_logits = teacher_logits.detach()
+            student_logits = teacher_logits
 
         kl_loss /= (len(p_s) - 1)
         loss = ce_loss + kl_alpha_max * kl_loss
