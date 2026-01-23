@@ -75,7 +75,7 @@ use_amp = not args.noamp
 aug = args.noaug
 
 
-if not args.gpu=='all':
+if not args.gpu=='all' and not args.dp:
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 device = "cuda" if torch.cuda.is_available() else "cpu"
 best_acc = 0  # best test accuracy
@@ -282,6 +282,7 @@ else:
 
 # net to cuda
 net = net.to(device)
+classification_head = net.classifier
 
 
 # Check triod prefix OD implementation
@@ -349,7 +350,7 @@ def train(epoch):
 
         # output = net(inputs, all_models=True)
         prelast = net(inputs, return_prelast=True)
-        full_logits = net.classifier(prelast)
+        full_logits = classification_head(prelast)
         # full model lost 
         ce_loss = F.cross_entropy(
             full_logits,
@@ -357,13 +358,13 @@ def train(epoch):
             ignore_index=-1
         )
         kl_loss = 0.0
-        for i, teacher_logits in enumerate(compute_cum_outputs(prelast, net.classifier, p_s)):
+        for i, teacher_logits in enumerate(compute_cum_outputs(prelast, classification_head, p_s)):
             if i == 0:
                 student_logits = teacher_logits
                 continue
             kl_loss = kl_loss + F.cross_entropy(
                 student_logits,
-                teacher_logits.softmax(dim=-1).detach(),
+                teacher_logits.softmax(dim=-1).detach()
             )
             student_logits = teacher_logits
 
