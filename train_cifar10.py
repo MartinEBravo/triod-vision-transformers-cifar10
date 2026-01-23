@@ -357,16 +357,34 @@ def train(epoch):
             targets,
             ignore_index=-1
         )
+        
+        #####################################################
+        ###########  Knowledge Distillation Loss ############
+        #####################################################
         kl_loss = 0.0
-        for i, teacher_logits in enumerate(compute_cum_outputs(prelast, classification_head, p_s)):
-            if i == 0:
-                student_logits = teacher_logits
-                continue
+        prev_logits = None
+        for i, logits_i in enumerate(compute_cum_outputs(prelast, net.classifier, p_s)):
+            # Hierarchical Knowledge Distillation, current logit is the teacher, previous is student
+            if args.use_hkd:
+                if prev_logits is None: # first iteration
+                    prev_logits = logits_i
+                    continue
+                student_logits = prev_logits # Student is previous logit
+                teacher_logits = logits_i # Teacher is current logit
+                prev_logits = logits_i # update for next iteration
+            
+            # Knowledge Distillation, current logit is the student, teacher is full model
+            else:
+                if i == len(p_s) - 1:
+                    break # skip full model
+                student_logits = logits_i # Student is current logit
+                teacher_logits = full_logits # Teacher is full model
+
+            # KL loss
             kl_loss = kl_loss + F.cross_entropy(
                 student_logits,
                 teacher_logits.softmax(dim=-1).detach()
             )
-            student_logits = teacher_logits
 
         kl_loss /= (len(p_s) - 1)
         loss = ce_loss + kl_alpha_max * kl_loss
