@@ -308,6 +308,22 @@ criterion = nn.CrossEntropyLoss()
 if args.opt == "adam":
     optimizer = optim.Adam(net.parameters(), lr=args.lr)
 elif args.opt == "sgd":
+    decay, no_decay = [], []
+    for name, p in net.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.dim() == 1 or name.endswith(".bias"):
+            no_decay.append(p)
+        else:
+            decay.append(p)
+    optimizer = torch.optim.SGD(
+        [
+            {"params": decay, "weight_decay": 5e-4},
+            {"params": no_decay, "weight_decay": 0},
+        ],
+        lr=args.lr,
+        momentum=0.9,
+    )
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
     
 # use cosine scheduling
@@ -366,8 +382,7 @@ def train(epoch):
         optimizer.zero_grad(set_to_none=True)
 
         train_loss += loss.item()
-        progress_bar(batch_idx, len(trainloader))
-    print(f"Loss: {loss.item():.3f} | KL Alpha: {kl_alpha_max:.3f} ", end='\r')
+        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f' % (train_loss/(batch_idx+1)))
 
     return train_loss/(batch_idx+1)
 
@@ -388,10 +403,10 @@ def test(epoch):
                 accs[i] += predicted.eq(targets).sum().item()/targets.size(0)
             progress_bar(batch_idx, len(testloader))
 
-    accs = accs/(batch_idx+1)
+    accs = 100*np.array(accs)/(batch_idx+1)
     losses = losses/(batch_idx+1)
     print('Loss: ' + 'p = ' + ', '.join([f'{p_s[i]:.2f}: {losses[i]:.2f}' for i in range(len(p_s))]))
-    print('Accuracy: ' + 'p = ' + ', '.join([f'{p_s[i]:.2f}: {100*accs[i]:.2f}%' for i in range(len(p_s))]))
+    print('Accuracy: ' + 'p = ' + ', '.join([f'{p_s[i]:.2f}: {accs[i]:.2f}%' for i in range(len(p_s))]))
 
     # Save checkpoint.
     acc = np.mean(accs)
