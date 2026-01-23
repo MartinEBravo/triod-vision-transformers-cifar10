@@ -375,8 +375,8 @@ def train(epoch):
 def test(epoch):
     global best_acc
     net.eval()
-    losses = [0.0 for _ in p_s]
-    accs = [0.0 for _ in p_s]
+    losses = np.zeros(len(p_s))
+    accs = np.zeros(len(p_s))
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(testloader):
             inputs, targets = inputs.to(device), targets.to(device)
@@ -387,11 +387,14 @@ def test(epoch):
                 _, predicted = output.max(1)
                 accs[i] += predicted.eq(targets).sum().item()/targets.size(0)
             progress_bar(batch_idx, len(testloader))
-    print('Loss: ' + 'p = ' + ', '.join([f'{p_s[i]:.2f}: {losses[i]/(batch_idx+1):.3f}' for i in range(len(p_s))]), end=' | ')
-    print('Accuracy: ' + 'p = ' + ', '.join([f'{p_s[i]:.2f}: {accs[i]/(batch_idx+1):.3f}' for i in range(len(p_s))]))
+
+    accs = accs/(batch_idx+1)
+    losses = losses/(batch_idx+1)
+    print('Loss: ' + 'p = ' + ', '.join([f'{p_s[i]:.2f}: {losses[i]:.2f}' for i in range(len(p_s))]))
+    print('Accuracy: ' + 'p = ' + ', '.join([f'{p_s[i]:.2f}: {100*accs[i]:.2f}%' for i in range(len(p_s))]))
 
     # Save checkpoint.
-    acc = sum(accs)/len(accs)/(batch_idx+1)
+    acc = np.mean(accs)
     if acc > best_acc:
         print('Saving..')
         state = {
@@ -407,9 +410,6 @@ def test(epoch):
         best_acc = acc
     return losses, accs
 
-list_loss = []
-list_acc = []
-
 if usewandb:
     wandb.watch(net)
     
@@ -421,16 +421,13 @@ for epoch in range(start_epoch, args.n_epochs):
     
     scheduler.step(epoch-1) # step cosine scheduling
     
-    list_loss.append(mean(val_losses))
-    list_acc.append(mean(val_accs))
-    
     # Log training..
     if usewandb:
         log_payload = {
             'epoch': epoch,
             'train_loss': trainloss,
-            'mean_loss': mean(val_losses),
-            "mean_acc": mean(val_accs),
+            'mean_loss': np.mean(val_losses),
+            "mean_acc": np.mean(val_accs),
             "lr": optimizer.param_groups[0]["lr"],
             "epoch_time": time.time()-start,
         }
@@ -438,14 +435,6 @@ for epoch in range(start_epoch, args.n_epochs):
             log_payload[f"acc_p_{p:.2f}"] = val_accs[i]
             log_payload[f"loss_p_{p:.2f}"] = val_losses[i]
         wandb.log(log_payload)
-
-    # Write out csv..
-    csv_file = f'log/log_{args.net}_{args.dataset}_patch{args.patch}.csv'
-    with open(csv_file, 'w') as f:
-        writer = csv.writer(f, lineterminator='\n')
-        writer.writerow(list_loss) 
-        writer.writerow(list_acc) 
-    print(list_loss)
 
 # writeout wandb
 if usewandb:
