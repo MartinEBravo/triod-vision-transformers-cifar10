@@ -40,7 +40,7 @@ class FeedForward(nn.Module):
         x = self.fc1(x, p=p)     
         x = self.act(x)
         x = self.drop1(x)
-        x = self.fc2(x, p=None) 
+        x = self.fc2(x, p=p) 
         x = self.drop2(x)
         return x
 
@@ -56,7 +56,6 @@ class Attention(nn.Module):
         self.scale = dim_head ** -0.5
 
         self.attend = nn.Softmax(dim = -1)
-        # self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
 
         self.q = TriODLinear(dim, inner_dim, triangular=triangular)
         self.k = TriODLinear(dim, inner_dim, triangular=triangular)
@@ -64,20 +63,17 @@ class Attention(nn.Module):
         # self.to_qkv = TriODLinear(dim, inner_dim * 3, triangular=triangular)
 
         self.to_out = SequentialWithP(
-            TriODHeadLayerNorm(inner_dim, n_head=heads, triangular=True),
-            TriODLinear(inner_dim, dim, triangular=True),
+            TriODHeadLayerNorm(inner_dim, n_head=heads, triangular=triangular),
+            TriODLinear(inner_dim, dim, triangular=triangular),
             nn.Dropout(dropout)
         ) if project_out else nn.Identity()
 
     def forward(self, x, p: float | None = None):
         h_keep = self.heads if p is None else max(1, math.ceil(self.heads * p))
-        keep = h_keep * self.dim_head
-        p_inner = keep / self.inner_dim
 
-
-        q = self.q(x, p=p_inner)
-        k = self.k(x, p=p_inner)
-        v = self.v(x, p=p_inner)
+        q = self.q(x, p=p)
+        k = self.k(x, p=p)
+        v = self.v(x, p=p)
 
         q = rearrange(q, 'b n (h d) -> b h n d', h=h_keep, d=self.dim_head)
         k = rearrange(k, 'b n (h d) -> b h n d', h=h_keep, d=self.dim_head)
@@ -88,7 +84,7 @@ class Attention(nn.Module):
         out = torch.matmul(attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
 
-        return self.to_out(out, p=None)
+        return self.to_out(out, p=p)
 
 class Transformer(nn.Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0., triangular: bool = False):
@@ -136,7 +132,7 @@ class ViT(nn.Module):
         self.pool = pool
         self.to_latent = nn.Identity()
 
-        self.ln = TriODHeadLayerNorm(dim, n_head=heads, triangular=triangular),
+        self.ln = TriODHeadLayerNorm(dim, n_head=heads, triangular=triangular)
         self.classifier = TriODLinear(dim, num_classes, triangular=False)
 
     def forward(self, img, p=None, return_prelast=False, all_models=False):
@@ -148,13 +144,13 @@ class ViT(nn.Module):
         x += self.pos_embedding[:, :(n + 1)]
         x = self.dropout(x)
 
-        # # # TODO: temporal fix, we should use TriODEmbedding with p in the future but they are equivalent for now
-        # if p is not None:
-        #     head_dim = self.dim // self.heads
-        #     keep_heads = max(1, math.ceil(self.heads * p))
-        #     keep_dim = keep_heads * head_dim
-        #     p = keep_dim / self.dim
-        #     x = x[:, :, :keep_dim]
+        # Keep only a head-aligned prefix when p is set so residuals stay compatible.
+        if p is not None:
+            head_dim = self.dim // self.heads
+            keep_heads = max(1, math.ceil(self.heads * p))
+            keep_dim = keep_heads * head_dim
+            p = keep_dim / self.dim
+            x = x[:, :, :keep_dim]
 
         x = self.transformer(x, p=p)
 
@@ -169,26 +165,3 @@ class ViT(nn.Module):
             return x
         return self.classifier(x)
 
-if __name__ == '__main__':
-    model = ViT(
-        image_size = 32,
-        patch_size = 4,
-        num_classes = 10,
-        dim = 128,
-        depth = 6,
-        heads = 8,
-        mlp_dim = 256,
-        pool = 'cls',
-        channels = 3,
-        dim_head = 64,
-        dropout = 0.,
-        emb_dropout = 0.1,
-        triangular = True,
-        p_s = [0.25, 0.5, 0.75, 1.0]
-    )
-
-    img = torch.randn(10, 3, 32, 32)
-    dataloader = DataLoader([(img, img)])
-    logits = model(img, p=0.5)
-    print(logits.shape)
-    test_prefix_od(model, 'cpu', dataloader, [0.25, 0.5, 0.75, 1.0])
