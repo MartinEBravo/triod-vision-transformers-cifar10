@@ -313,17 +313,22 @@ if args.resume:
 # Loss is CE
 criterion = nn.CrossEntropyLoss()
 
+decay, no_decay = [], []
+for name, p in net.named_parameters():
+    if not p.requires_grad:
+        continue
+    if p.dim() == 1 or name.endswith(".bias"):
+        no_decay.append(p)
+    else:
+        decay.append(p)
 if args.opt == "adam":
-    optimizer = optim.Adam(net.parameters(), lr=args.lr)
+    optimizer = optim.Adam([
+        {"params": decay, "weight_decay": 5e-4},
+        {"params": no_decay, "weight_decay": 0},
+        ],
+        lr=args.lr
+    )
 elif args.opt == "sgd":
-    decay, no_decay = [], []
-    for name, p in net.named_parameters():
-        if not p.requires_grad:
-            continue
-        if p.dim() == 1 or name.endswith(".bias"):
-            no_decay.append(p)
-        else:
-            decay.append(p)
     optimizer = torch.optim.SGD(
         [
             {"params": decay, "weight_decay": 5e-4},
@@ -365,7 +370,7 @@ def train(epoch):
         #####################################################
         kl_loss = 0.0
         prev_logits = None
-        for i, logits_i in enumerate(compute_cum_outputs(prelast, net.classifier, p_s)):
+        for i, logits_i in enumerate(compute_cum_outputs(prelast, classification_head, p_s)):
             # Hierarchical Knowledge Distillation, current logit is the teacher, previous is student
             if args.use_hkd:
                 if prev_logits is None: # first iteration
