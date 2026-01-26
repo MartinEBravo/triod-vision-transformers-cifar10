@@ -8,7 +8,8 @@ import math
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 
-from triod.utils import generate_structured_masked_x, SequentialWithP, test_prefix_od
+from triod.utils import generate_structured_masked_x
+from triod.layers.sequential import TriODSequential
 from triod.layers.linear import TriODLinear
 from triod.layers.layer_norm import TriODHeadLayerNorm
 
@@ -62,7 +63,7 @@ class Attention(nn.Module):
         self.v = TriODLinear(dim, inner_dim, triangular=triangular)
         # self.to_qkv = TriODLinear(dim, inner_dim * 3, triangular=triangular)
 
-        self.to_out = SequentialWithP(
+        self.to_out = TriODSequential(
             TriODHeadLayerNorm(inner_dim, n_head=heads, triangular=triangular),
             TriODLinear(inner_dim, dim, triangular=triangular),
             nn.Dropout(dropout)

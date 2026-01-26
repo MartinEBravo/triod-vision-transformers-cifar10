@@ -13,7 +13,8 @@ import torch.nn.functional as F
 from triod.layers.conv import TriODConv2d
 from triod.layers.linear import TriODLinear
 from triod.layers.batch_norm import TriODBatchNorm2d
-from triod.utils import SequentialWithP, generate_structured_masked_x
+from triod.layers.sequential import TriODSequential
+from triod.utils import generate_structured_masked_x
 
 
 class BasicBlock(nn.Module):
@@ -26,9 +27,9 @@ class BasicBlock(nn.Module):
         self.conv2 = TriODConv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False, triangular=triangular)
         self.bn2 = TriODBatchNorm2d(planes)
 
-        self.shortcut = SequentialWithP()
+        self.shortcut = TriODSequential()
         if stride != 1 or in_planes != self.expansion*planes:
-            self.shortcut = SequentialWithP(
+            self.shortcut = TriODSequential(
                 TriODConv2d(in_planes, self.expansion*planes, kernel_size=1, stride=stride, bias=False, triangular=triangular),
                 TriODBatchNorm2d(self.expansion*planes)
             )
@@ -53,9 +54,9 @@ class Bottleneck(nn.Module):
         self.conv3 = TriODConv2d(planes, self.expansion*planes, kernel_size=1, bias=False, triangular=triangular)
         self.bn3 = TriODBatchNorm2d(self.expansion*planes)
 
-        self.shortcut = SequentialWithP()
+        self.shortcut = TriODSequential()
         if stride != 1 or in_planes != self.expansion*planes:
-            self.shortcut = SequentialWithP(
+            self.shortcut = TriODSequential(
                 TriODConv2d(in_planes, self.expansion*planes, kernel_size=1, stride=stride, bias=False, triangular=triangular),
                 TriODBatchNorm2d(self.expansion*planes)
             )
@@ -94,7 +95,7 @@ class ResNet(nn.Module):
         for stride in strides:
             layers.append(block(self.in_planes, planes, stride, triangular=triangular))
             self.in_planes = planes * block.expansion
-        return SequentialWithP(*layers)
+        return TriODSequential(*layers)
 
     def forward(self, x, p=None, return_prelast=False, all_models=False):
         out = F.relu(self.bn1(self.conv1(x,p)))
