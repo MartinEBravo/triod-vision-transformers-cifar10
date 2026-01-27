@@ -305,7 +305,7 @@ if args.resume:
     print('==> Resuming from checkpoint..')
     assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
     checkpoint_path = './checkpoint/{}-{}-{}-ckpt.t7'.format(args.net, args.dataset, args.patch)
-    checkpoint = torch.load(checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
     net.load_state_dict(checkpoint['net'])
     best_acc = checkpoint['acc']
     start_epoch = checkpoint['epoch']
@@ -323,7 +323,7 @@ for name, p in net.named_parameters():
         decay.append(p)
 if args.opt == "adam":
     optimizer = optim.Adam([
-        {"params": decay, "weight_decay": 5e-4},
+        {"params": decay, "weight_decay": 5e-2},
         {"params": no_decay, "weight_decay": 0},
         ],
         lr=args.lr
