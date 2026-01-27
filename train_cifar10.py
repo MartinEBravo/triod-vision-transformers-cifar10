@@ -58,6 +58,7 @@ parser.add_argument('--kl_alpha_max', default=0.59, type=float, help='maximum kl
 parser.add_argument('--min_p', default=0.1, type=float, help='minimum p for TriOD models')
 parser.add_argument('--n_models', default=10, type=int, help='number of models for TriOD models')
 parser.add_argument('--use_hkd', action='store_true', help='use hierarchical knowledge distillation')
+parser.add_argument('--use_tkd', action='store_true', help='use targeted knowledge distillation')
 
 triangular = True
 
@@ -379,7 +380,12 @@ def train(epoch):
                 student_logits = prev_logits # Student is previous logit
                 teacher_logits = logits_i # Teacher is current logit
                 prev_logits = logits_i # update for next iteration
-            
+            # Targeted Knowledge Distillation, current logit is the student, teacher is ground truth
+            elif args.use_tkd:
+                if i == len(p_s) - 1:
+                    break # skip full model, already have CE loss
+                student_logits = logits_i # Student is current logit
+                teacher_logits = targets # Teacher is ground truth
             # Knowledge Distillation, current logit is the student, teacher is full model
             else:
                 if i == len(p_s) - 1:
