@@ -21,7 +21,6 @@ import torchvision.transforms as transforms
 import os
 import argparse
 import pandas as pd
-import csv
 import time
 
 from models import *
@@ -37,7 +36,6 @@ from triod.utils import compute_cum_outputs, test_prefix_od
 
 # parsers
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10/100/ImageNet Training')
-parser.add_argument('--lr', default=0.016, type=float, help='learning rate') # resnets.. 1e-3, Vit..1e-4
 parser.add_argument('--opt', default="sgd")
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--noaug', action='store_false', help='disable use randomaug')
@@ -54,11 +52,18 @@ parser.add_argument('--patch', default='4', type=int, help="patch for ViT")
 parser.add_argument('--dimhead', default="512", type=int)
 parser.add_argument('--convkernel', default='8', type=int, help="parameter for convmixer")
 parser.add_argument('--dataset', default='cifar10', type=str, help='dataset to use (cifar10, cifar100, imagenet)')
-parser.add_argument('--kl_alpha_max', default=0.59, type=float, help='maximum kl alpha for DyT')
+
+# TriOD
+parser.add_argument('--triangular', default=True, action='store_true', help='use triangular learning rate schedule')
 parser.add_argument('--min_p', default=0.1, type=float, help='minimum p for TriOD models')
 parser.add_argument('--n_models', default=10, type=int, help='number of models for TriOD models')
-parser.add_argument('--use_hkd', action='store_true', help='use hierarchical knowledge distillation')
-parser.add_argument('--use_tkd', action='store_true', help='use targeted knowledge distillation')
+
+
+lr_min, lr_max = 1e-4, 1e-1
+weight_decay_min, weight_decay_max = 0.0, 1e-1
+kl_alpha_max_min, kl_alpha_max_max = 0.0, 2.0
+kl_alpha_constant_choices = [True, False]
+kl_mode_choices = ["hkd", "tkd", "kd"]
 
 triangular = True
 
@@ -68,12 +73,6 @@ args = parser.parse_args()
 usewandb = not args.nowandb
 if usewandb:
     import wandb
-    watermark = "{}_lr{}_{}".format(args.net, args.lr, args.dataset)
-    wandb.init(
-            entity="martin-bravo-mbzuai",
-            project="triod",
-            name=watermark)
-    wandb.config.update(args)
 
 bs = int(args.bs)
 imsize = int(args.size)
@@ -300,6 +299,18 @@ classification_head = net.classifier
 
 assert test_prefix_od(net, device, trainloader, p_s=p_s), "Prefix OD test failed"
 
+sweep_configuration = {
+    "method": "bayesian",
+    "metric": {"goal": "maximize", "name": "mean_acc"},
+    "parameters": {
+        "lr": {"min": lr_min, "max": lr_max},
+        "kl_alpha_max": {"min": kl_alpha_max_min, "max": kl_alpha_max_max},
+        "kl_alpha_constant": {"values": kl_alpha_constant_choices},
+        "kl_mode": {"values": kl_mode_choices},
+        "weight_decay": {"min": weight_decay_min, "max": weight_decay_max},
+    },
+}
+
 
 if args.resume:
     # Load checkpoint.
@@ -311,181 +322,207 @@ if args.resume:
     best_acc = checkpoint['acc']
     start_epoch = checkpoint['epoch']
 
-# Loss is CE
-criterion = nn.CrossEntropyLoss()
+def sweep_run():
+    watermark = f"{args.net}_{args.dataset}"
+    wandb.init(
+            entity="martin-bravo-mbzuai",
+            project="triod",
+            name=watermark)
+    wandb.config.update(args)
 
-decay, no_decay = [], []
-for name, p in net.named_parameters():
-    if not p.requires_grad:
-        continue
-    if p.dim() == 1 or name.endswith(".bias"):
-        no_decay.append(p)
-    else:
-        decay.append(p)
-if args.opt == "adam":
-    optimizer = optim.Adam([
-        {"params": decay, "weight_decay": 5e-2},
-        {"params": no_decay, "weight_decay": 0},
-        ],
-        lr=args.lr
-    )
-elif args.opt == "sgd":
-    optimizer = torch.optim.SGD(
-        [
-            {"params": decay, "weight_decay": 5e-4},
+    config = wandb.config
+    lr = config.lr
+    weight_decay = config.weight_decay
+    kl_alpha_max = config.kl_alpha_max
+    kl_mode = config.kl_mode
+    kl_alpha_constant = config.kl_alpha_constant
+
+    # Loss is CE
+    criterion = nn.CrossEntropyLoss()
+
+    decay, no_decay = [], []
+    for name, p in net.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.dim() == 1 or name.endswith(".bias"):
+            no_decay.append(p)
+        else:
+            decay.append(p)
+    if args.opt == "adam":
+        optimizer = optim.Adam([
+            {"params": decay, "weight_decay": weight_decay},
             {"params": no_decay, "weight_decay": 0},
-        ],
-        lr=args.lr,
-        momentum=0.9,
-    )
-    
-# use cosine scheduling
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.n_epochs)
-
-##### Training
-scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
-def train(epoch):
-    print('\nEpoch: %d' % epoch)
-    net.train()
-    train_loss = 0
-    kl_alpha_max = (
-        args.kl_alpha_max
-        * (1 - math.cos(math.pi * epoch / args.n_epochs))
-        / 2.0
-    )
-    for batch_idx, (inputs, targets) in enumerate(trainloader):
-        inputs, targets = inputs.to(device), targets.to(device)
-
-        # output = net(inputs, all_models=True)
-        prelast = net(inputs, return_prelast=True)
-        full_logits = classification_head(prelast)
-        # full model lost 
-        ce_loss = F.cross_entropy(
-            full_logits,
-            targets
+            ],
+            lr=lr
+        )
+    elif args.opt == "sgd":
+        optimizer = torch.optim.SGD(
+            [
+                {"params": decay, "weight_decay": weight_decay},
+                {"params": no_decay, "weight_decay": 0},
+            ],
+            lr=lr,
+            momentum=0.9,
         )
         
-        #####################################################
-        ###########  Knowledge Distillation Loss ############
-        #####################################################
-        kl_loss = 0.0
-        prev_logits = None
-        for i, logits_i in enumerate(compute_cum_outputs(prelast, classification_head, p_s)):
-            # Hierarchical Knowledge Distillation, current logit is the teacher, previous is student
-            if args.use_hkd:
-                if prev_logits is None: # first iteration
-                    prev_logits = logits_i
-                    continue
-                student_logits = prev_logits # Student is previous logit
-                teacher_logits = logits_i # Teacher is current logit
-                prev_logits = logits_i # update for next iteration
-            # Targeted Knowledge Distillation, current logit is the student, teacher is ground truth
-            elif args.use_tkd:
-                if i == len(p_s) - 1:
-                    break # skip full model, already have CE loss
-                student_logits = logits_i # Student is current logit
-                teacher_logits = targets # Teacher is ground truth
-            # Knowledge Distillation, current logit is the student, teacher is full model
-            else:
-                if i == len(p_s) - 1:
-                    break # skip full model
-                student_logits = logits_i # Student is current logit
-                teacher_logits = full_logits # Teacher is full model
+    # use cosine scheduling
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.n_epochs)
 
-            # KL loss
-            kl_loss = kl_loss + F.cross_entropy(
-                student_logits,
-                teacher_logits.softmax(dim=-1).detach()
+    ##### Training
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    def train(epoch):
+        print('\nEpoch: %d' % epoch)
+        net.train()
+        train_loss = 0
+        if not kl_alpha_constant:
+            kl_alpha = (
+                kl_alpha_max
+                * (1 - math.cos(math.pi * epoch / args.n_epochs))
+                / 2.0
             )
-
-        kl_loss /= (len(p_s) - 1)
-        loss = ce_loss + kl_alpha_max * kl_loss
-
-        # output_full = output[-B:]
-        # kl_loss = 0.0
-        # if len(p_s)>1:
-        #     output_submodels = output[:-B]
-        #     output_teachers = output[B:]
-        #     with torch.no_grad():
-        #         prob_teachers = output_teachers.softmax(dim=1)
-        #     kl_loss = criterion(output_submodels, prob_teachers)
-
-        # Backward + step
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad(set_to_none=True)
-
-        train_loss += loss.item()
-        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f' % (train_loss/(batch_idx+1)))
-
-    return train_loss/(batch_idx+1)
-
-##### Validation
-def test(epoch):
-    global best_acc
-    net.eval()
-    losses = np.zeros(len(p_s))
-    accs = np.zeros(len(p_s))
-    with torch.no_grad():
-        for batch_idx, (inputs, targets) in enumerate(testloader):
+        else:
+            kl_alpha = kl_alpha_max
+        for batch_idx, (inputs, targets) in enumerate(trainloader):
             inputs, targets = inputs.to(device), targets.to(device)
-            for i in range(len(p_s)):
-                output = net(inputs, p=p_s[i])
-                loss = criterion(output, targets)
-                losses[i] += loss.item()
-                _, predicted = output.max(1)
-                accs[i] += predicted.eq(targets).sum().item()/targets.size(0)
-            progress_bar(batch_idx, len(testloader))
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                # output = net(inputs, all_models=True)
+                prelast = net(inputs, return_prelast=True)
+                full_logits = classification_head(prelast)
+                # full model lost 
+                ce_loss = F.cross_entropy(
+                    full_logits,
+                    targets
+                )
 
-    accs = 100*np.array(accs)/(batch_idx+1)
-    losses = losses/(batch_idx+1)
-    for i, p in enumerate(p_s):
-        print("p={:.2f} | Loss: {:.3f} | Acc: {:.3f}%".format(p, losses[i], accs[i]))
+                #####################################################
+                ###########  Knowledge Distillation Loss ############
+                #####################################################
+                kl_loss = 0.0
+                prev_logits = None
+                for i, logits_i in enumerate(compute_cum_outputs(prelast, classification_head, p_s)):
+                    # Hierarchical Knowledge Distillation, current logit is the teacher, previous is student
+                    if kl_mode=="hkd":
+                        if prev_logits is None: # first iteration
+                            prev_logits = logits_i
+                            continue
+                        student_logits = prev_logits # Student is previous logit
+                        teacher_logits = logits_i # Teacher is current logit
+                        prev_logits = logits_i # update for next iteration
+                    # Targeted Knowledge Distillation, current logit is the student, teacher is ground truth
+                    elif kl_mode=="tkd":
+                        if i == len(p_s) - 1:
+                            break # skip full model, already have CE loss
+                        student_logits = logits_i # Student is current logit
+                        teacher_logits = targets # Teacher is ground truth
+                    # Knowledge Distillation, current logit is the student, teacher is full model
+                    elif kl_mode=="kd":
+                        if i == len(p_s) - 1:
+                            break # skip full model
+                        student_logits = logits_i # Student is current logit
+                        teacher_logits = full_logits # Teacher is full model
 
-    # Save checkpoint.
-    acc = np.mean(accs)
-    if acc > best_acc:
-        print('Saving..')
-        state = {
-            "net": net.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scaler": scaler.state_dict(),
-            "acc": acc,
-            "epoch": epoch,
-        }
-        if not os.path.isdir('checkpoint'):
-            os.mkdir('checkpoint')
-        torch.save(state, './checkpoint/{}-{}-{}-ckpt.t7'.format(args.net, args.dataset, args.patch))
-        best_acc = acc
-    return losses, accs
+                    # KL loss
+                    kl_loss = kl_loss + F.cross_entropy(
+                        student_logits,
+                        teacher_logits.softmax(dim=-1).detach()
+                    )
 
-if usewandb:
-    wandb.watch(net)
-    
-net.cuda()
-for epoch in range(start_epoch, args.n_epochs):
-    start = time.time()
-    trainloss = train(epoch)
-    val_losses, val_accs = test(epoch)
-    
-    scheduler.step() # step cosine scheduling
-    
-    # Log training..
-    if usewandb:
-        log_payload = {
-            'epoch': epoch,
-            'train_loss': trainloss,
-            'mean_loss': np.mean(val_losses),
-            "mean_acc": np.mean(val_accs),
-            "lr": optimizer.param_groups[0]["lr"],
-            "epoch_time": time.time()-start,
-        }
+                kl_loss /= (len(p_s) - 1)
+                loss = ce_loss + kl_alpha * kl_loss
+
+                # output_full = output[-B:]
+                # kl_loss = 0.0
+                # if len(p_s)>1:
+                #     output_submodels = output[:-B]
+                #     output_teachers = output[B:]
+                #     with torch.no_grad():
+                #         prob_teachers = output_teachers.softmax(dim=1)
+                #     kl_loss = criterion(output_submodels, prob_teachers)
+
+            # Backward + step
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+            train_loss += loss.item()
+            progress_bar(batch_idx, len(trainloader), 'Loss: %.3f' % (train_loss/(batch_idx+1)))
+
+        return train_loss/(batch_idx+1)
+
+    ##### Validation
+    def test(epoch):
+        global best_acc
+        net.eval()
+        losses = np.zeros(len(p_s))
+        accs = np.zeros(len(p_s))
+        with torch.no_grad():
+            for batch_idx, (inputs, targets) in enumerate(testloader):
+                inputs, targets = inputs.to(device), targets.to(device)
+                for i in range(len(p_s)):
+                    output = net(inputs, p=p_s[i])
+                    loss = criterion(output, targets)
+                    losses[i] += loss.item()
+                    _, predicted = output.max(1)
+                    accs[i] += predicted.eq(targets).sum().item()/targets.size(0)
+                progress_bar(batch_idx, len(testloader))
+
+        accs = 100*np.array(accs)/(batch_idx+1)
+        losses = losses/(batch_idx+1)
         for i, p in enumerate(p_s):
-            log_payload[f"acc_p_{p:.2f}"] = val_accs[i]
-            log_payload[f"loss_p_{p:.2f}"] = val_losses[i]
-        wandb.log(log_payload)
+            print("p={:.2f} | Loss: {:.3f} | Acc: {:.3f}%".format(p, losses[i], accs[i]))
 
-# writeout wandb
-if usewandb:
-    wandb.save("wandb_{}_{}.h5".format(args.net, args.dataset))
+        # Save checkpoint.
+        acc = np.mean(accs)
+        if acc > best_acc:
+            print('Saving..')
+            state = {
+                "net": net.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scaler": scaler.state_dict(),
+                "acc": acc,
+                "epoch": epoch,
+            }
+            if not os.path.isdir('checkpoint'):
+                os.mkdir('checkpoint')
+            torch.save(state, './checkpoint/{}-{}-{}-ckpt.t7'.format(args.net, args.dataset, args.patch))
+            best_acc = acc
+        return losses, accs
+
+    if usewandb:
+        wandb.watch(net)
+        
+    # net.cuda()
+    for epoch in range(start_epoch, args.n_epochs):
+        start = time.time()
+        trainloss = train(epoch)
+        val_losses, val_accs = test(epoch)
+        
+        scheduler.step() # step cosine scheduling
+        
+        # Log training..
+        if usewandb:
+            log_payload = {
+                'epoch': epoch,
+                'train_loss': trainloss,
+                'mean_loss': np.mean(val_losses),
+                "mean_acc": np.mean(val_accs),
+                "lr": optimizer.param_groups[0]["lr"],
+                "epoch_time": time.time()-start,
+            }
+            for i, p in enumerate(p_s):
+                log_payload[f"acc_p_{p:.2f}"] = val_accs[i]
+                log_payload[f"loss_p_{p:.2f}"] = val_losses[i]
+            wandb.log(log_payload)
+
+    # writeout wandb
+    if usewandb:
+        wandb.save("wandb_{}_{}.h5".format(args.net, args.dataset))
+
+if __name__ == "__main__":
+    if usewandb:
+        sweep_id = wandb.sweep(sweep_configuration, project="triod")
+        wandb.agent(sweep_id, function=sweep_run, count=None)
+    else:
+        print("No wandb detected, you need to use wandb to run sweeps.")
+        pass
