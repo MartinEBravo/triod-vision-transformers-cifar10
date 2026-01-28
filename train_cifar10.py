@@ -23,6 +23,8 @@ import argparse
 import pandas as pd
 import csv
 import time
+import wandb
+from wandb import config
 
 from models import *
 from utils import progress_bar
@@ -60,7 +62,9 @@ parser.add_argument('--triangular', default=True, action='store_true', help='use
 parser.add_argument('--min_p', default=0.2, type=float, help='minimum p for TriOD models')
 parser.add_argument('--n_models', default=5, type=int, help='number of models for TriOD models')
 parser.add_argument('--kl_alpha_max', default=0.59, type=float, help='maximum kl alpha for DyT')
-parser.add_argument('--kl_loss', default='kd', type=str, help='type of kl loss to use (kd, hkd, tkd)')
+parser.add_argument('--weight_decay', default=5e-4, type=float, help='weight decay for optimizer')
+parser.add_argument('--kl_alpha_constant', default=True, action='store_true', help='whether to use constant kl alpha or not')
+parser.add_argument('--kl_mode', default='kd', type=str, help='type of kl loss to use (kd, hkd, tkd)')
 # Sweep
 parser.add_argument('--sweep', action='store_true', help='whether to use sweep or not')
 lr_min, lr_max = 1e-4, 1e-1
@@ -75,14 +79,6 @@ args = parser.parse_args()
 
 # take in args
 usewandb = not args.nowandb
-if usewandb and not args.sweep:
-    import wandb
-    watermark = "{}_lr{}_{}".format(args.net, args.lr, args.dataset)
-    wandb.init(
-            entity="martin-bravo-mbzuai",
-            project="triod",
-            name=watermark)
-    wandb.config.update(args)
 
 bs = int(args.bs)
 imsize = int(args.size)
@@ -309,19 +305,6 @@ classification_head = net.classifier
 
 assert test_prefix_od(net, device, trainloader, p_s=p_s), "Prefix OD test failed"
 
-sweep_configuration = {
-    "method": "bayes",
-    "metric": {"goal": "maximize", "name": "mean_acc"},
-    "parameters": {
-        "lr": {"min": lr_min, "max": lr_max},
-        "kl_alpha_max": {"min": kl_alpha_max_min, "max": kl_alpha_max_max},
-        "kl_alpha_constant": {"values": kl_alpha_constant_choices},
-        "kl_mode": {"values": kl_mode_choices},
-        "weight_decay": {"min": weight_decay_min, "max": weight_decay_max},
-    },
-}
-
-
 if args.resume:
     # Load checkpoint.
     print('==> Resuming from checkpoint..')
@@ -333,6 +316,29 @@ if args.resume:
     start_epoch = checkpoint['epoch']
 
 def run():
+    if args.sweep:
+        wandb.init(
+            entity="martin-bravo-mbzuai",
+            project="triod",
+            name="sweep_{}_{}".format(args.net, args.dataset)
+        )
+        config = wandb.config
+        lr = config.lr
+        kl_alpha_max = config.kl_alpha_max
+        kl_alpha_constant = config.kl_alpha_constant
+        kl_mode = config.kl_mode
+        weight_decay = config.weight_decay
+    else:
+        wandb.init(
+            entity="martin-bravo-mbzuai",
+            project="triod",
+            name="{}_lr{}_{}".format(args.net, args.lr, args.dataset)
+        )
+        lr = args.lr
+        kl_alpha_max = args.kl_alpha_max
+        kl_alpha_constant = args.kl_alpha_constant
+        kl_mode = args.kl_mode
+        weight_decay = args.weight_decay
     decay, no_decay = [], []
     for name, p in net.named_parameters():
         if not p.requires_grad:
@@ -343,18 +349,18 @@ def run():
             decay.append(p)
     if args.opt == "adam":
         optimizer = optim.Adam([
-            {"params": decay, "weight_decay": 5e-2},
+            {"params": decay, "weight_decay": weight_decay},
             {"params": no_decay, "weight_decay": 0},
             ],
-            lr=args.lr
+            lr=lr
         )
     elif args.opt == "sgd":
         optimizer = torch.optim.SGD(
             [
-                {"params": decay, "weight_decay": 5e-4},
+                {"params": decay, "weight_decay": weight_decay},
                 {"params": no_decay, "weight_decay": 0},
             ],
-            lr=args.lr,
+            lr=lr,
             momentum=0.9,
         )
         
@@ -518,8 +524,19 @@ def run():
 
 if __name__ == "__main__":
     if args.sweep:
+        config = {
+            "method": "bayes",
+            "metric": {"goal": "maximize", "name": "mean_acc"},
+            "parameters": {
+                "lr": {"min": lr_min, "max": lr_max},
+                "kl_alpha_max": {"min": kl_alpha_max_min, "max": kl_alpha_max_max},
+                "kl_alpha_constant": {"values": kl_alpha_constant_choices},
+                "kl_mode": {"values": kl_mode_choices},
+                "weight_decay": {"min": weight_decay_min, "max": weight_decay_max},
+            },
+        }
         import wandb
-        sweep_id = wandb.sweep(sweep_configuration, project="triod")
+        sweep_id = wandb.sweep(config, project="triod")
         wandb.agent(sweep_id, function=run, count=20)
     else:
         run()
