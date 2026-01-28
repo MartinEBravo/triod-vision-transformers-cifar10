@@ -39,7 +39,7 @@ from triod.utils import compute_cum_outputs, test_prefix_od
 
 # parsers
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10/100/ImageNet Training')
-parser.add_argument('--lr', default=0.016, type=float, help='learning rate') # resnets.. 1e-3, Vit..1e-4
+parser.add_argument('--lr', default=1e-2, type=float, help='learning rate') # resnets.. 1e-3, Vit..1e-4
 parser.add_argument('--opt', default="sgd")
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--noaug', action='store_false', help='disable use randomaug')
@@ -56,15 +56,14 @@ parser.add_argument('--patch', default='4', type=int, help="patch for ViT")
 parser.add_argument('--dimhead', default="512", type=int)
 parser.add_argument('--convkernel', default='8', type=int, help="parameter for convmixer")
 parser.add_argument('--dataset', default='cifar10', type=str, help='dataset to use (cifar10, cifar100, imagenet)')
-
 # TriOD
 parser.add_argument('--triangular', default=True, action='store_true', help='use triangular learning rate schedule')
 parser.add_argument('--min_p', default=0.2, type=float, help='minimum p for TriOD models')
 parser.add_argument('--n_models', default=5, type=int, help='number of models for TriOD models')
-parser.add_argument('--kl_alpha_max', default=0.59, type=float, help='maximum kl alpha for DyT')
+parser.add_argument('--kl_alpha_max', default=1.0, type=float, help='maximum kl alpha for DyT')
 parser.add_argument('--weight_decay', default=5e-4, type=float, help='weight decay for optimizer')
-parser.add_argument('--kl_alpha_constant', default=True, action='store_true', help='whether to use constant kl alpha or not')
-parser.add_argument('--kl_mode', default='kd', type=str, help='type of kl loss to use (kd, hkd, tkd)')
+parser.add_argument('--kl_alpha_constant', action='store_true', help='whether to use constant kl alpha or not')
+parser.add_argument('--kl_mode', default='tkd', type=str, help='type of kl loss to use (kd, hkd, tkd)')
 # Sweep
 parser.add_argument('--sweep', action='store_true', help='whether to use sweep or not')
 lr_min, lr_max = 1e-4, 1e-1
@@ -73,9 +72,10 @@ kl_alpha_max_min, kl_alpha_max_max = 0.0, 2.0
 kl_alpha_constant_choices = [True, False]
 kl_mode_choices = ["hkd", "tkd", "kd"]
 
-triangular = True
-
 args = parser.parse_args()
+
+# TriOD turned on
+print(f"TriOD: {args.triangular}")
 
 # take in args
 usewandb = not args.nowandb
@@ -157,15 +157,15 @@ p_s = np.linspace(args.min_p, 1.0, num=args.n_models)
 print('==> Building model..')
 # net = VGG('VGG19')
 if args.net=='res18':
-    net = ResNet18(num_classes=num_classes, triangular=triangular, p_s=p_s)
+    net = ResNet18(num_classes=num_classes, triangular=args.triangular, p_s=p_s)
 elif args.net=='vgg':
-    net = VGG('VGG19', num_classes=num_classes, triangular=triangular, p_s=p_s)
+    net = VGG('VGG19', num_classes=num_classes, triangular=args.triangular, p_s=p_s)
 elif args.net=='res34':
-    net = ResNet34(num_classes=num_classes, triangular=triangular, p_s=p_s)
+    net = ResNet34(num_classes=num_classes, triangular=args.triangular, p_s=p_s)
 elif args.net=='res50':
-    net = ResNet50(num_classes=num_classes, triangular=triangular, p_s=p_s)
+    net = ResNet50(num_classes=num_classes, triangular=args.triangular, p_s=p_s)
 elif args.net=='res101':
-    net = ResNet101(num_classes=num_classes, triangular=triangular, p_s=p_s)
+    net = ResNet101(num_classes=num_classes, triangular=args.triangular, p_s=p_s)
 elif args.net=="convmixer":
     # from paper, accuracy >96%. you can tune the depth and dim to scale accuracy and speed.
     net = ConvMixer(256, 16, kernel_size=args.convkernel, patch_size=1, n_classes=num_classes)
@@ -191,7 +191,7 @@ elif args.net=="vit_small":
     mlp_dim = 512,
     dropout = 0.1,
     emb_dropout = 0.1,
-    triangular = triangular,
+    triangular = args.triangular,
     p_s = p_s
 )
 elif args.net=="vit_tiny":
@@ -206,7 +206,7 @@ elif args.net=="vit_tiny":
     mlp_dim = 256,
     dropout = 0.1,
     emb_dropout = 0.1,
-    triangular = triangular,
+    triangular = args.triangular,
     p_s = p_s
 )
 elif args.net=="simplevit":
@@ -232,7 +232,7 @@ elif args.net=="vit":
     mlp_dim = 512,
     dropout = 0.1,
     emb_dropout = 0.1,
-    triangular = triangular,
+    triangular = args.triangular,
     p_s = p_s
 )
 elif args.net=="dyt":
