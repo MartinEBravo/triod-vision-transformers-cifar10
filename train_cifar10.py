@@ -39,7 +39,7 @@ from triod.utils import compute_cum_outputs, test_prefix_od
 
 # parsers
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10/100/ImageNet Training')
-parser.add_argument('--lr', default=0.016, type=float, help='learning rate') # resnets.. 1e-3, Vit..1e-4
+parser.add_argument('--lr', default=1e-1, type=float, help='learning rate') # resnets.. 1e-3, Vit..1e-4
 parser.add_argument('--opt', default="sgd")
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--noaug', action='store_false', help='disable use randomaug')
@@ -51,19 +51,18 @@ parser.add_argument('--dp', action='store_true', help='use data parallel')
 parser.add_argument('--gpu', default='all', type=str, help='GPU id to use.')
 parser.add_argument('--bs', default='128')
 parser.add_argument('--size', default="32")
-parser.add_argument('--n_epochs', type=int, default='200')
+parser.add_argument('--n_epochs', type=int, default='300')
 parser.add_argument('--patch', default='4', type=int, help="patch for ViT")
 parser.add_argument('--dimhead', default="512", type=int)
 parser.add_argument('--convkernel', default='8', type=int, help="parameter for convmixer")
 parser.add_argument('--dataset', default='cifar10', type=str, help='dataset to use (cifar10, cifar100, imagenet)')
-
 # TriOD
 parser.add_argument('--triangular', default=True, action='store_true', help='use triangular learning rate schedule')
-parser.add_argument('--min_p', default=0.2, type=float, help='minimum p for TriOD models')
-parser.add_argument('--n_models', default=5, type=int, help='number of models for TriOD models')
-parser.add_argument('--kl_alpha_max', default=0.59, type=float, help='maximum kl alpha for DyT')
+parser.add_argument('--min_p', default=0.1, type=float, help='minimum p for TriOD models')
+parser.add_argument('--n_models', default=10, type=int, help='number of models for TriOD models')
+parser.add_argument('--kl_alpha_max', default=1.0, type=float, help='maximum kl alpha for DyT')
 parser.add_argument('--weight_decay', default=5e-4, type=float, help='weight decay for optimizer')
-parser.add_argument('--kl_alpha_constant', default=True, action='store_true', help='whether to use constant kl alpha or not')
+parser.add_argument('--kl_alpha_constant', action='store_true', help='whether to use constant kl alpha or not')
 parser.add_argument('--kl_mode', default='kd', type=str, help='type of kl loss to use (kd, hkd, tkd)')
 # Sweep
 parser.add_argument('--sweep', action='store_true', help='whether to use sweep or not')
@@ -389,10 +388,7 @@ def run():
                 prelast = net(inputs, return_prelast=True)
                 full_logits = classification_head(prelast)
                 # full model lost 
-                ce_loss = F.cross_entropy(
-                    full_logits,
-                    targets
-                )
+                ce_loss = F.cross_entropy(full_logits, targets)
 
                 #####################################################
                 ###########  Knowledge Distillation Loss ############
@@ -531,8 +527,7 @@ if __name__ == "__main__":
                 "lr": {"min": lr_min, "max": lr_max},
                 "kl_alpha_max": {"min": kl_alpha_max_min, "max": kl_alpha_max_max},
                 "kl_alpha_constant": {"values": kl_alpha_constant_choices},
-                "kl_mode": {"values": kl_mode_choices},
-                "weight_decay": {"min": weight_decay_min, "max": weight_decay_max},
+                "kl_mode": {"values": kl_mode_choices}
             },
         }
         import wandb
