@@ -34,13 +34,14 @@ from models.dyt import DyT
 
 # Check triod prefix OD implementation
 from triod.utils import compute_cum_outputs, test_prefix_od
+from triod.wrapper import triod
 
 # parsers
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10/100/ImageNet Training')
-parser.add_argument('--lr', default=1e-1, type=float, help='learning rate') # resnets.. 1e-3, Vit..1e-4
-parser.add_argument('--opt', default="sgd")
+parser.add_argument('--lr', default=5e-2, type=float, help='learning rate') # resnets.. 1e-3, Vit..1e-4
+parser.add_argument('--opt', default="adam")
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
-parser.add_argument('--noaug', action='store_false', help='disable use randomaug')
+parser.add_argument('--noaug', action='store_true', help='disable use randomaug')
 parser.add_argument('--noamp', action='store_true', help='disable mixed precision training. for older pytorch versions')
 parser.add_argument('--nowandb', action='store_true', help='disable wandb')
 parser.add_argument('--project', default='triod', type=str, help='wandb project name')
@@ -48,9 +49,9 @@ parser.add_argument('--mixup', action='store_true', help='add mixup augumentatio
 parser.add_argument('--net', default='res18')
 parser.add_argument('--dp', action='store_true', help='use data parallel')
 parser.add_argument('--gpu', default='all', type=str, help='GPU id to use.')
-parser.add_argument('--bs', default='128')
+parser.add_argument('--bs', default='256')
 parser.add_argument('--size', default="32")
-parser.add_argument('--n_epochs', type=int, default='100')
+parser.add_argument('--n_epochs', type=int, default=200)
 parser.add_argument('--patch', default='4', type=int, help="patch for ViT")
 parser.add_argument('--dimhead', default="512", type=int)
 parser.add_argument('--convkernel', default='8', type=int, help="parameter for convmixer")
@@ -65,8 +66,8 @@ parser.add_argument('--kd_beta_max', default=0.0, type=float, help='maximum hkd 
 parser.add_argument('--kd_gamma_max', default=0.0, type=float, help=' maximum tkd gamma for DyT')
 parser.add_argument('--weight_decay', default=5e-4, type=float, help='weight decay for optimizer')
 parser.add_argument('--kd_constant', action='store_true', help='whether to use constant kl alpha or not')
-parser.add_argument('--criterion', default='ce', type=str, help='criterion to use (kl, mse)')
-parser.add_argument('--T', default=1.0, type=float, help='temperature for kd loss')
+parser.add_argument('--criterion', default='kl', type=str, help='criterion to use (kl, mse)')
+parser.add_argument('--T', default=4.0, type=float, help='temperature for kd loss')
 
 args = parser.parse_args()
 
@@ -99,7 +100,11 @@ bs = int(args.bs)
 imsize = int(args.size)
 
 use_amp = not args.noamp
-aug = args.noaug
+aug = not args.noaug
+
+print(f"use_amp: {use_amp}, aug: {aug}")
+print(f"triangular: {triangular}, min_p: {args.min_p}, n_models: {args.n_models}")
+input("Press Enter to continue...")
 
 
 if not args.gpu=='all' and not args.dp:
@@ -149,7 +154,8 @@ transform_test = transforms.Compose([
 
 # Add RandAugment with N, M(hyperparameter)
 if aug:  
-    N = 2; M = 14;
+    N = 2
+    M = 14
     transform_train.transforms.insert(0, RandAugment(N, M))
 
 def seed_worker(worker_id):
@@ -175,20 +181,19 @@ else:
     # so we don't list them all here
     classes = None
 
-p_s = np.linspace(args.min_p, 1.0, num=args.n_models)
 # Model factory..
 print('==> Building model..')
 # net = VGG('VGG19')
 if args.net=='res18':
-    net = ResNet18(num_classes=num_classes, triangular=args.triangular, p_s=p_s)
+    net = ResNet18(num_classes=num_classes)
 elif args.net=='vgg':
-    net = VGG('VGG19', num_classes=num_classes, triangular=args.triangular, p_s=p_s)
+    net = VGG('VGG19', num_classes=num_classes)
 elif args.net=='res34':
-    net = ResNet34(num_classes=num_classes, triangular=args.triangular, p_s=p_s)
+    net = ResNet34(num_classes=num_classes)
 elif args.net=='res50':
-    net = ResNet50(num_classes=num_classes, triangular=args.triangular, p_s=p_s)
+    net = ResNet50(num_classes=num_classes)
 elif args.net=='res101':
-    net = ResNet101(num_classes=num_classes, triangular=args.triangular, p_s=p_s)
+    net = ResNet101(num_classes=num_classes)
 elif args.net=="convmixer":
     # from paper, accuracy >96%. you can tune the depth and dim to scale accuracy and speed.
     net = ConvMixer(256, 16, kernel_size=args.convkernel, patch_size=1, n_classes=num_classes)
@@ -213,9 +218,7 @@ elif args.net=="vit_small":
     heads = 8,
     mlp_dim = 512,
     dropout = 0.1,
-    emb_dropout = 0.1,
-    triangular = args.triangular,
-    p_s = p_s
+    emb_dropout = 0.1
 )
 elif args.net=="vit_tiny":
     from models.vit_small import ViT
@@ -228,9 +231,7 @@ elif args.net=="vit_tiny":
     heads = 6,
     mlp_dim = 256,
     dropout = 0.1,
-    emb_dropout = 0.1,
-    triangular = args.triangular,
-    p_s = p_s
+    emb_dropout = 0.1
 )
 elif args.net=="simplevit":
     from models.simplevit import SimpleViT
@@ -254,9 +255,7 @@ elif args.net=="vit":
     heads = 8,
     mlp_dim = 512,
     dropout = 0.1,
-    emb_dropout = 0.1,
-    triangular = args.triangular,
-    p_s = p_s
+    emb_dropout = 0.1
 )
 elif args.net=="dyt":
     # DyT for cifar10/100
@@ -322,11 +321,11 @@ if 'cuda' in device:
         print("using data parallel")
         net = torch.nn.DataParallel(net) # make parallel
         cudnn.benchmark = True
-# net to cuda
-net = net.to(device)
-classification_head = net.classifier
 
-assert test_prefix_od(net, device, trainloader, p_s=p_s), "Prefix OD test failed"
+# triodify the model for prefix OD
+p_s = np.linspace(args.min_p, 1.0, num=args.n_models)
+net = triod(net, triangular=triangular).to(device) # move to device after triodifying
+assert net.p_test(next(iter(trainloader))[0].to(device), p_s=p_s), "TriOD property test failed"
 
 if args.resume:
     # Load checkpoint.
@@ -384,80 +383,70 @@ def train(epoch):
 
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         inputs, targets = inputs.to(device), targets.to(device)
-        # with torch.cuda.amp.autocast(enabled=use_amp):
-        if True:
+        with torch.cuda.amp.autocast(enabled=use_amp):
             #####################################################
             ###########  Cross Entropy Loss #####################
             #####################################################
             # output = net(inputs, all_models=True)
             prelast = net(inputs, return_prelast=True)
-            full_logits = classification_head(prelast)
+            full_logits = net.classify(prelast)
             ce_loss = F.cross_entropy(full_logits, targets)
-
             #####################################################
             ###########  Knowledge Distillation Loss ############
             #####################################################
             kd_loss, hkd_loss, tkd_loss = 0.0, 0.0, 0.0
-            prev_logits = None
-            for i, logits_i in enumerate(compute_cum_outputs(prelast, classification_head, p_s)):
-                # Knowledge Distillation, current logit is the student, teacher is full model
-                if alpha > 0.0:
-                    if i == len(p_s) - 1:
-                        pass
-                    else:
-                        if args.criterion == 'ce':
-                            kd_loss = kd_loss + F.cross_entropy(
-                                logits_i, # Student is current logit
-                                F.softmax(full_logits, dim=-1).detach() # Teacher is the full model
+            if args.n_models > 1:
+                prev_logits = None
+                for i, logits_i in enumerate(compute_cum_outputs(prelast, net, p_s)):
+                    # Knowledge Distillation, current logit is the student, teacher is full model
+                    if alpha > 0.0:
+                        if i == len(p_s) - 1:
+                            pass
+                        else:
+                            if args.criterion == 'ce':
+                                kd_loss = kd_loss + F.cross_entropy(
+                                    logits_i, # Student is current logit
+                                    F.softmax(full_logits, dim=-1).detach() # Teacher is the full model
+                                )
+                            elif args.criterion == 'kl':
+                                kd_loss = kd_loss + F.kl_div(
+                                    F.log_softmax(logits_i / args.T, dim=-1),
+                                    F.softmax(full_logits / args.T, dim=-1).detach(),
+                                    reduction='batchmean'
+                                ) * (args.T * args.T)
+
+                    # Hierarchical Knowledge Distillation, current logit is the teacher, previous is student
+                    if beta > 0.0:
+                        if prev_logits is None: # first iteration
+                            pass
+                        else: 
+                            if args.criterion == 'ce':
+                                hkd_loss = hkd_loss + F.cross_entropy(
+                                    prev_logits, # Student is previous logit
+                                    F.softmax(logits_i, dim=-1).detach() # Teacher is current logit
+                                )
+                            elif args.criterion == 'kl':
+                                hkd_loss = hkd_loss + F.kl_div(
+                                    F.log_softmax(prev_logits / args.T, dim=-1),
+                                    F.softmax(logits_i / args.T, dim=-1).detach(),
+                                    reduction='batchmean'
+                                ) * (args.T * args.T)
+                        prev_logits = logits_i # update for next iteration
+
+                    # Targeted Knowledge Distillation, current logit is the student, teacher is ground truth
+                    if gamma > 0.0:
+                        if i == len(p_s) - 1:
+                            pass
+                        else:
+                            tkd_loss = tkd_loss + F.cross_entropy(
+                                logits_i,
+                                targets
                             )
-                        elif args.criterion == 'kl':
-                            kd_loss = kd_loss + F.kl_div(
-                                F.log_softmax(logits_i / args.T, dim=-1),
-                                F.softmax(full_logits / args.T, dim=-1).detach(),
-                                reduction='batchmean'
-                            ) * (args.T * args.T)
 
-                # Hierarchical Knowledge Distillation, current logit is the teacher, previous is student
-                if beta > 0.0:
-                    if prev_logits is None: # first iteration
-                        pass
-                    else: 
-                        if args.criterion == 'ce':
-                            hkd_loss = hkd_loss + F.cross_entropy(
-                                prev_logits, # Student is previous logit
-                                F.softmax(logits_i, dim=-1).detach() # Teacher is current logit
-                            )
-                        elif args.criterion == 'kl':
-                            hkd_loss = hkd_loss + F.kl_div(
-                                F.log_softmax(prev_logits / args.T, dim=-1),
-                                F.softmax(logits_i / args.T, dim=-1).detach(),
-                                reduction='batchmean'
-                            ) * (args.T * args.T)
-                    prev_logits = logits_i # update for next iteration
-
-                # Targeted Knowledge Distillation, current logit is the student, teacher is ground truth
-                if gamma > 0.0:
-                    if i == len(p_s) - 1:
-                        pass
-                    else:
-                        tkd_loss = tkd_loss + F.cross_entropy(
-                            logits_i,
-                            targets
-                        )
-
-            kd_loss /= (len(p_s) - 1)
-            hkd_loss /= (len(p_s) - 1)
-            tkd_loss /= (len(p_s) - 1)
+                kd_loss /= (len(p_s) - 1)
+                hkd_loss /= (len(p_s) - 1)
+                tkd_loss /= (len(p_s) - 1)
             loss = ce_loss + alpha * kd_loss + beta * hkd_loss + gamma * tkd_loss
-
-            # output_full = output[-B:]
-            # kl_loss = 0.0
-            # if len(p_s)>1:
-            #     output_submodels = output[:-B]
-            #     output_teachers = output[B:]
-            #     with torch.no_grad():
-            #         prob_teachers = output_teachers.softmax(dim=1)
-            #     kl_loss = criterion(output_submodels, prob_teachers)
 
         # Backward + step
         scaler.scale(loss).backward()
@@ -480,11 +469,17 @@ def test(epoch):
         for batch_idx, (inputs, targets) in enumerate(testloader):
             inputs, targets = inputs.to(device), targets.to(device)
             prelast = net(inputs, return_prelast=True)
-            for i, logits_i in enumerate(compute_cum_outputs(prelast, classification_head, p_s)):
-                loss = F.cross_entropy(logits_i, targets)
-                losses[i] += loss.item()
-                _, predicted = logits_i.max(1)
-                accs[i] += predicted.eq(targets).sum().item()/targets.size(0)
+            logits_full = net.classify(prelast)
+            losses[-1] += F.cross_entropy(logits_full, targets).item()
+            accs[-1] += (logits_full.argmax(dim=-1) == targets).sum().item()/targets.size(0)
+            if args.n_models > 1:
+                for i, logits_i in enumerate(compute_cum_outputs(prelast, net, p_s)):
+                    if i == len(p_s) - 1:
+                        continue
+                    loss = F.cross_entropy(logits_i, targets)
+                    losses[i] += loss.item()
+                    _, predicted = logits_i.max(1)
+                    accs[i] += predicted.eq(targets).sum().item()/targets.size(0)
             progress_bar(batch_idx, len(testloader))
 
     accs = 100*np.array(accs)/(batch_idx+1)
