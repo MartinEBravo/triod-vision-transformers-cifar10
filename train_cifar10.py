@@ -465,6 +465,9 @@ def test(epoch):
     net.eval()
     losses = np.zeros(len(p_s))
     accs = np.zeros(len(p_s))
+    agreements = np.zeros(len(p_s))
+    sum_min_agree_p = 0.0
+    n_samples = 0
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(testloader):
             inputs, targets = inputs.to(device), targets.to(device)
@@ -473,19 +476,36 @@ def test(epoch):
             losses[-1] += F.cross_entropy(logits_full, targets).item()
             accs[-1] += (logits_full.argmax(dim=-1) == targets).sum().item()/targets.size(0)
             if args.n_models > 1:
+                full_preds = logits_full.argmax(dim=-1)
+                batch_agrees = []
                 for i, logits_i in enumerate(compute_cum_outputs(prelast, net, p_s)):
+                    preds_i = logits_i.argmax(dim=-1)
+                    batch_agrees.append(preds_i.eq(full_preds))
+                    agreements[i] += preds_i.eq(full_preds).sum().item() / targets.size(0)
                     if i == len(p_s) - 1:
                         continue
                     loss = F.cross_entropy(logits_i, targets)
                     losses[i] += loss.item()
                     _, predicted = logits_i.max(1)
                     accs[i] += predicted.eq(targets).sum().item()/targets.size(0)
+                # Smallest p that agrees with the full model per sample
+                agree_matrix = torch.stack(batch_agrees, dim=0)  # (n_models, batch_size)
+                first_agree_idx = agree_matrix.float().argmax(dim=0).cpu().numpy()
+                min_p_per_sample = p_s[first_agree_idx]
+                # Where no model agrees, argmax returns 0; default to 1.0
+                any_agree = agree_matrix.any(dim=0).cpu().numpy()
+                min_p_per_sample[~any_agree] = 1.0
+                sum_min_agree_p += min_p_per_sample.sum()
+                n_samples += targets.size(0)
             progress_bar(batch_idx, len(testloader))
 
     accs = 100*np.array(accs)/(batch_idx+1)
     losses = losses/(batch_idx+1)
+    agreements = 100 * agreements / (batch_idx + 1)
+    avg_min_agree_p = sum_min_agree_p / n_samples if n_samples > 0 else 0.0
     for i, p in enumerate(p_s):
-        print("p={:.2f} | Loss: {:.3f} | Acc: {:.3f}%".format(p, losses[i], accs[i]))
+        print("p={:.2f} | Loss: {:.3f} | Acc: {:.3f}% | Agree: {:.1f}%".format(p, losses[i], accs[i], agreements[i]))
+    print("Avg smallest agreeing p: {:.4f}".format(avg_min_agree_p))
 
     # Save checkpoint.
     acc = np.mean(accs)
@@ -502,7 +522,7 @@ def test(epoch):
             os.mkdir('checkpoint')
         torch.save(state, './checkpoint/{}-{}-{}-ckpt.t7'.format(args.net, args.dataset, args.patch))
         best_acc = acc
-    return losses, accs
+    return losses, accs, agreements, avg_min_agree_p
 
 if usewandb:
     wandb.watch(net)
@@ -511,7 +531,7 @@ net.cuda()
 for epoch in range(start_epoch, args.n_epochs):
     start = time.time()
     trainloss = train(epoch)
-    val_losses, val_accs = test(epoch)
+    val_losses, val_accs, val_agreements, avg_min_p = test(epoch)
     
     scheduler.step() # step cosine scheduling
     
@@ -531,6 +551,8 @@ for epoch in range(start_epoch, args.n_epochs):
         for i, p in enumerate(p_s):
             log_payload[f"acc_p_{p:.2f}"] = val_accs[i]
             log_payload[f"loss_p_{p:.2f}"] = val_losses[i]
+            log_payload[f"agree_p_{p:.2f}"] = val_agreements[i]
+        log_payload["avg_min_agree_p"] = avg_min_p
         wandb.log(log_payload)
 
 print("Training completed. Best acc: {:.3f}".format(best_acc))
