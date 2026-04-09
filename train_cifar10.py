@@ -450,6 +450,8 @@ def train(epoch):
 
         # Backward + step
         scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
